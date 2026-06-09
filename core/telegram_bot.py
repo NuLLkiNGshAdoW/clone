@@ -28,82 +28,66 @@ class TelegramBot:
         sev = alert.get("severity", "LOW")
         if sev not in self._sev_filter:
             return
-        icons = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "⚪"}
-        icon = icons.get(sev, "⚪")
-        atype = alert.get("type", "?")
         actor = alert.get("actor", "?")
-        ts = alert.get("time", datetime.now().strftime("%H:%M:%S"))
-        text = (
-            f"{icon} *SOC SENTINEL ALERT*\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"*Тип:* `{atype}`\n"
-            f"*Источник:* `{actor}`\n"
-            f"*Уровень:* `{sev}`\n"
-            f"*Время:* `{ts}`"
-        )
-        keyboard = {
-            "inline_keyboard": [[
-                {"text": "🚫 Заблокировать", "callback_data": f"block:{actor}"},
-                {"text": "✅ Игнорировать",  "callback_data": f"ignore:{actor}"}
-            ]]
-        }
+        if self.engine and hasattr(self.engine, "_ips") and self.engine._ips.is_ignored(actor):
+            return
+        icons = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "⚪"}
+        text = (f"{icons.get(sev,'⚪')} *SOC SENTINEL ALERT*\n"
+                f"*Тип:* `{alert.get('type','?')}`\n*Источник:* `{actor}`\n"
+                f"*Уровень:* `{sev}`\n*Время:* `{alert.get('time', datetime.now().strftime('%H:%M:%S'))}`")
+        keyboard = {"inline_keyboard": [[
+            {"text": "🚫 Заблокировать", "callback_data": f"block:{actor}"},
+            {"text": "✅ Игнорировать", "callback_data": f"ignore:{actor}"}
+        ]]}
         self._send(text, keyboard)
 
     def _send(self, text: str, reply_markup: dict = None):
         if not self.token or not self.chat_id:
             return
         try:
-            payload = {
-                "chat_id": self.chat_id,
-                "text": text,
-                "parse_mode": "Markdown",
-            }
+            payload = {"chat_id": self.chat_id, "text": text, "parse_mode": "Markdown"}
             if reply_markup:
                 import json
                 payload["reply_markup"] = json.dumps(reply_markup)
             requests.post(f"{self._base}/sendMessage", json=payload, timeout=5)
         except Exception as e:
-            logging.warning(f"[TelegramBot] send failed: {e}")
+            logging.warning("[TelegramBot] send failed: %s", e)
 
     def _poll_loop(self):
         while self._running:
             try:
-                params = {"timeout": 10, "offset": self._last_update_id + 1}
-                r = requests.get(f"{self._base}/getUpdates", params=params, timeout=15)
+                r = requests.get(f"{self._base}/getUpdates",
+                    params={"timeout": 10, "offset": self._last_update_id + 1}, timeout=15)
                 if r.status_code == 200:
-                    data = r.json()
-                    for upd in data.get("result", []):
+                    for upd in r.json().get("result", []):
                         self._last_update_id = upd["update_id"]
                         self._handle_update(upd)
             except Exception as e:
-                logging.warning(f"[TelegramBot] poll error: {e}")
+                logging.warning("[TelegramBot] poll error: %s", e)
             threading.Event().wait(1)
 
     def _handle_update(self, upd: dict):
         cb = upd.get("callback_query")
         if not cb:
             return
-        data = cb.get("data", "")
-        cb_id = cb.get("id")
+        data, cb_id = cb.get("data", ""), cb.get("id")
         if data.startswith("block:"):
-            ip = data.split("block:")[1]
-            if self.engine:
-                try:
-                    self.engine.block_ip(ip)
-                    self._answer_callback(cb_id, f"🚫 {ip} заблокирован")
-                    self._send(f"🚫 *Заблокировано:* `{ip}`")
-                except Exception as e:
-                    self._answer_callback(cb_id, f"Ошибка: {e}")
+            target = data.split("block:", 1)[1]
+            if self.engine and hasattr(self.engine, "block_attacker"):
+                res = self.engine.block_attacker(target, reason="Telegram block", threat_type="TG_BLOCK")
+                self._answer_callback(cb_id, f"🚫 {target} ({res.get('kind','')})")
+            elif self.engine:
+                self.engine.block_ip(target)
+                self._answer_callback(cb_id, f"🚫 {target}")
         elif data.startswith("ignore:"):
-            ip = data.split("ignore:")[1]
-            self._answer_callback(cb_id, f"✅ {ip} проигнорирован")
+            target = data.split("ignore:", 1)[1]
+            if self.engine and hasattr(self.engine, "_ips"):
+                self.engine._ips.ignore_target(target)
+            self._answer_callback(cb_id, f"✅ {target} проигнорирован")
 
     def _answer_callback(self, cb_id: str, text: str):
         try:
-            requests.post(
-                f"{self._base}/answerCallbackQuery",
-                json={"callback_query_id": cb_id, "text": text},
-                timeout=5
-            )
+            requests.post(f"{self._base}/answerCallbackQuery",
+                json={"callback_query_id": cb_id, "text": text}, timeout=5)
         except Exception:
             pass

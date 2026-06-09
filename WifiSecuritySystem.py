@@ -66,7 +66,7 @@ if SCAPY_AVAILABLE:
     import scapy.all as scapy
 
 try:
-    from flask import Flask, jsonify
+    from flask import Flask, jsonify, request
     from flask_cors import CORS
     FLASK_AVAILABLE = True
 except ImportError:
@@ -232,6 +232,23 @@ def _build_flask_app(engine_ref) -> "Flask":
     def api_health():
         return jsonify({"ok": True, "service": "SOC Sentinel"})
 
+    @flask_app.route("/")
+    def mobile_dashboard():
+        html_path = Path(__file__).resolve().parent / "web" / "dashboard.html"
+        if html_path.exists():
+            return html_path.read_text(encoding="utf-8")
+        return "<h1>SOC Sentinel</h1>", 404
+
+    @flask_app.route("/api/network")
+    def api_network():
+        from utils.network import get_connection_urls, get_primary_lan_ip
+        port = int(load_config().get("web_port", 5000))
+        urls = get_connection_urls(port)
+        primary = get_primary_lan_ip()
+        return jsonify({"port": port, "hostname": socket.gethostname(),
+            "primary_ip": primary, "primary_url": f"http://{primary}:{port}" if primary else None,
+            "urls": urls, "same_network_required": True})
+
     return flask_app
 
 CONFIG_FILE = Path("sentinel_config.json")
@@ -254,22 +271,23 @@ DEFAULT_CONFIG = {
     "ai_log_dialogs": True,
     "language": "en",
     "deep_http_capture": False,
+    "web_port": 5000,
+    "web_enabled": True,
+    "web_firewall": True,
+    "device_fingerprint_enabled": True,
+    "behavior_score_threshold": 70,
 }
 
-def _hash(pw): return hashlib.sha256(pw.encode()).hexdigest()
+from utils.auth import (
+    load_users as _auth_load_users, save_users as _auth_save_users,
+    authenticate, register_user, upgrade_password_on_login, can as rbac_can,
+)
 
 def load_users():
-    if USERS_FILE.exists():
-        try:
-            with open(USERS_FILE) as f: return json.load(f)
-        except Exception:
-            logging.exception("Error loading users file")
-    users = {"admin": {"password": _hash("admin123"), "role": "admin",
-                        "created": str(datetime.now())}}
-    save_users(users); return users
+    return _auth_load_users()
 
 def save_users(u):
-    with open(USERS_FILE, "w") as f: json.dump(u, f, indent=2)
+    _auth_save_users(u)
 
 def load_config():
     if CONFIG_FILE.exists():
@@ -637,10 +655,11 @@ class AuthWindow(ctk.CTkToplevel):
         if not username or not password:
             self._status.configure(text=tr('fill_fields')); return
         if mode == "login":
-            u = USERS.get(username)
-            if not u or u["password"] != _hash(password):
+            auth = authenticate(username, password, USERS)
+            if not auth:
                 self._status.configure(text=tr('invalid_credentials')); return
-            self.result = (username, u["role"]); self.destroy()
+            upgrade_password_on_login(username, password, USERS)
+            self.result = auth; self.destroy()
         else:
             if username in USERS:
                 self._status.configure(text=tr('username_taken')); return
@@ -649,9 +668,9 @@ class AuthWindow(ctk.CTkToplevel):
                 self._status.configure(text=tr('pw_mismatch')); return
             if len(password) < 6:
                 self._status.configure(text=tr('pw_minlen')); return
-            USERS[username] = {"password": _hash(password), "role": "user",
-                                "created": str(datetime.now())}
-            save_users(USERS); self.result = (username, "user"); self.destroy()
+            if not register_user(username, password, USERS, role="operator"):
+                self._status.configure(text=tr('username_taken')); return
+            self.result = (username, "operator"); self.destroy()
 
     def _cancel(self): self.result = None; self.destroy()
 
@@ -1809,6 +1828,58 @@ class ThreatPage(ctk.CTkFrame):
         for sev,card in self.sev_cards.items(): card.set(str(counts.get(sev,0)))
         self.after(2000,self._tick)
 
+class WebAccessPage(ctk.CTkFrame):
+    def __init__(self, master, engine, app_ref, **kw):
+        super().__init__(master, fg_color="transparent", **kw)
+        self.engine = engine
+        self.app_ref = app_ref
+        self._build()
+        self._tick()
+
+    def _build(self):
+        scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, pady=8)
+        hdr = ctk.CTkFrame(scroll, fg_color=T["bg_panel"], corner_radius=14)
+        hdr.pack(fill="x", padx=20, pady=(20, 12))
+        ctk.CTkLabel(hdr, text="📱  ВЕБ-ДАШБОРД (Wi-Fi)", font=FONT_HEADER,
+                     text_color=T["accent"]).pack(pady=(16, 4))
+        ctk.CTkLabel(hdr, text="Телефон и ПК — в одной Wi-Fi сети",
+                     font=FONT_SMALL, text_color=T["text_dim"]).pack(pady=(0, 12))
+        self._url_box = ctk.CTkTextbox(hdr, height=80, fg_color=T["bg_card"],
+                                        text_color=T["safe"], font=("Consolas", 14))
+        self._url_box.pack(fill="x", padx=16, pady=(0, 8))
+        brow = ctk.CTkFrame(hdr, fg_color="transparent")
+        brow.pack(fill="x", padx=16, pady=(0, 16))
+        ctk.CTkButton(brow, text="📋 Копировать", width=140, fg_color=T["accent"],
+                      text_color=T["bg_deep"], command=self._copy).pack(side="left", padx=4)
+        ctk.CTkButton(brow, text="🌐 Открыть", width=120, fg_color=T["safe"],
+                      text_color=T["bg_deep"], command=self._open).pack(side="left", padx=4)
+
+    def _refresh(self):
+        from utils.network import get_connection_urls
+        port = int(CFG.get("web_port", 5000))
+        urls = get_connection_urls(port)
+        lines = [f"📶 {u['label']}: {u['url']}" for u in urls] or ["⚠ Wi-Fi IP не найден"]
+        self._url_box.configure(state="normal")
+        self._url_box.delete("0.0", "end")
+        self._url_box.insert("end", "\n".join(lines))
+        self._url_box.configure(state="disabled")
+        self._primary = urls[0]["url"] if urls else ""
+
+    def _copy(self):
+        if getattr(self, "_primary", None):
+            self.clipboard_clear()
+            self.clipboard_append(self._primary)
+
+    def _open(self):
+        import webbrowser
+        if getattr(self, "_primary", None):
+            webbrowser.open(self._primary)
+
+    def _tick(self):
+        self._refresh()
+        self.after(8000, self._tick)
+
 class TopologyPage(ctk.CTkFrame):
     def __init__(self, master, engine, **kw):
         super().__init__(master, fg_color="transparent", **kw)
@@ -2702,6 +2773,7 @@ class SOCSentinel(ctk.CTk):
             ("dash",     "","dash"),
             ("analyzer", "","analyzer"),
             ("threats",  "","threats"),
+            ("web",      "","web"),
             ("topology", "","topology"),
             ("logs",     "","logs"),
             ("settings", "", "settings"),
@@ -2716,6 +2788,10 @@ class SOCSentinel(ctk.CTk):
         self.adapter_lbl = ctk.CTkLabel(bot, text=self.adapter[:24] or "—",
                                          font=FONT_TINY, text_color=T["text_dim"])
         self.adapter_lbl.pack()
+        self._web_url_lbl = ctk.CTkLabel(bot, text="📱 Web: …", font=FONT_TINY,
+                                          text_color=T["safe"], cursor="hand2")
+        self._web_url_lbl.pack(pady=(4, 0))
+        self._web_url_lbl.bind("<Button-1>", lambda e: self.show_page("web"))
 
         self.content = ctk.CTkFrame(self, fg_color=T["bg_deep"], corner_radius=0)
         self.content.grid(row=0, column=1, sticky="nsew")
@@ -2757,6 +2833,7 @@ class SOCSentinel(ctk.CTk):
             "dash":     DashboardPage(self.content, self.engine),
             "analyzer": AnalyzerPage(self.content, self.engine),
             "threats":  ThreatPage(self.content, self.engine),
+            "web":      WebAccessPage(self.content, self.engine, self),
             "topology": TopologyPage(self.content, self.engine),
             "logs":     LogsPage(self.content, self.engine),
             "settings": SettingsPage(self.content, self.engine, self, self._current_user),
@@ -2811,17 +2888,35 @@ class SOCSentinel(ctk.CTk):
             logging.exception("Failed to create AI floating button")
 
     def _start_flask_api(self):
-        if not FLASK_AVAILABLE: return
+        if not FLASK_AVAILABLE:
+            logging.warning("[Web] pip install flask flask-cors")
+            return
+        if not CFG.get("web_enabled", True):
+            return
         import weakref
+        from utils.network import get_connection_urls, open_firewall_port, get_primary_lan_ip
         engine_ref = weakref.ref(self.engine)
         flask_app  = _build_flask_app(engine_ref)
+        port = int(CFG.get("web_port", 5000))
+        if CFG.get("web_firewall", True):
+            try:
+                open_firewall_port(port)
+            except Exception:
+                pass
+        primary = get_primary_lan_ip()
+        if primary:
+            logging.info("[Web] Дашборд: http://%s:%s (та же Wi-Fi сеть)", primary, port)
+            try:
+                self._web_url_lbl.configure(text=f"📱 http://{primary}:{port}")
+            except Exception:
+                pass
 
         def _run():
             import logging as _lg
             _lg.getLogger("werkzeug").setLevel(_lg.ERROR)
-            flask_app.run(host="0.0.0.0", port=5150, debug=False, use_reloader=False)
+            flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
 
-        threading.Thread(target=_run, daemon=True, name="FlaskAPIThread").start()
+        threading.Thread(target=_run, daemon=True, name="FlaskWebThread").start()
 
     def _make_nav(self, pid, icon, label):
         label_text = tr(label)

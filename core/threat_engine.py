@@ -11,6 +11,9 @@ from collections import deque, defaultdict
 from utils.config import load_config
 from .detector import ThreatDetector
 from core.database import get_db
+from core.active_response import ActiveResponse
+from core.device_fingerprint import DeviceFingerprinter
+from core.plugin_loader import load_all_plugins
 from pathlib import Path
 import re
 
@@ -202,6 +205,10 @@ class ThreatEngine:
         self._demo = False
         self._demo_gen = None
 
+        self._ips = ActiveResponse(load_config, on_block=self._on_ips_block)
+        self._device_fp = DeviceFingerprinter(cfg.get("behavior_score_threshold", 70))
+        self._plugins = load_all_plugins(engine=self)
+
         self._wifi_monitor = None
         if not cfg.get("demo_mode", False):
             try:
@@ -305,10 +312,28 @@ class ThreatEngine:
         except Exception:
             logging.exception("Error in analyze_and_queue")
 
+    def _on_ips_block(self, rec):
+        with self.lock:
+            self.alerts.append({"time": rec.get("time"), "type": rec.get("type", "IPS_BLOCK"),
+                "actor": rec.get("target", ""), "severity": rec.get("severity", "HIGH"), "size": 0})
+            if rec.get("kind") == "ip":
+                self.blocked_ips.add(rec.get("target", ""))
+
+    def block_attacker(self, target, reason="", severity="HIGH", threat_type="IPS_BLOCK"):
+        res = self._ips.block_attacker(target, reason=reason, severity=severity, threat_type=threat_type)
+        if res.get("ok") and res.get("kind") == "ip":
+            self.blocked_ips.add(target)
+        return res
+
+    def unblock_target(self, target):
+        ok = self._ips.unblock_target(target)
+        self.blocked_ips.discard(target)
+        return ok
+
     def analyze(self, pkt):
-        # Full analyze logic adapted from original app, with per-IP rate checks
         if not SCAPY_AVAILABLE: return "N/A", "#777", []
         threats = []; now = time.time(); size = len(pkt)
+        cfg = load_config()
         with self.lock:
             self.packet_count += 1
             self.packet_stats["total"] += 1
@@ -328,6 +353,10 @@ class ThreatEngine:
                 pps_thresh = cfg.get("pps_thresh", 200)
                 if pps >= pps_thresh:
                     threats.append(("HIGH_PPS", src, "HIGH"))
+            if cfg.get("device_fingerprint_enabled", True) and pkt.haslayer(scapy.IP):
+                src_fp = pkt[scapy.IP].src
+                vend = lookup_vendor(self.arp_table.get(src_fp, "")) if self.arp_table.get(src_fp) else ""
+                threats.extend(self._device_fp.analyze_packet(pkt, src_fp, vendor=vend, now=now))
             if pkt.haslayer(scapy.ARP):
                 self.proto_counts["ARP"] += 1
                 if pkt[scapy.ARP].op == 2:
@@ -352,7 +381,7 @@ class ThreatEngine:
                     vendor = lookup_vendor(mac)
             except Exception:
                 vendor = None
-            if src in self.blocked_ips:
+            if src in self.blocked_ips or self._ips.is_blocked(src):
                 self.packet_stats["blocked"] += 1
                 return "🚫 BLOCKED", "#800080", []
             if pkt.haslayer(scapy.TCP):
@@ -407,7 +436,10 @@ class ThreatEngine:
             self.app_counts_recent[app] += 1
 
             # ── ИСПРАВЛЕНИЕ: используем кешированный конфиг ──
-            if cfg.get("auto_block") and threats: self.block_ip(src)
+            if cfg.get("auto_block") and threats:
+                for ttype, actor, sev in threats:
+                    if sev in ("CRITICAL", "HIGH") and not self._ips.is_ignored(actor):
+                        self.block_attacker(actor, reason=ttype, severity=sev, threat_type=ttype)
             for ttype, actor, sev in threats:
                 self._raise_alert(ttype, actor, sev, size)
                 # persist alerts to DB async if available
@@ -669,15 +701,17 @@ class ThreatEngine:
         if target_bot and sev in ("CRITICAL", "HIGH"):
             threading.Thread(target=target_bot.send_alert, args=(a,), daemon=True).start()
 
-    def block_ip(self, ip):
-        self.blocked_ips.add(ip)
+    def block_ip(self, ip, reason="", severity="HIGH"):
+        self.block_attacker(ip, reason=reason or "Manual block", severity=severity, threat_type="MANUAL_BLOCK")
 
     def unblock_ip(self, ip):
-        self.blocked_ips.discard(ip)
+        self.unblock_target(ip)
+
+    def block_mac(self, mac, reason="", severity="CRITICAL"):
+        return self.block_attacker(mac, reason=reason, threat_type="WIFI_BLOCK", severity=severity)
 
     def _add_firewall_rule(self, ip):
-        # platform specific handled by main app if needed
-        pass
+        self._ips.block_attacker(ip, use_firewall=True)
 
     def _proc_loop(self):
         while self._proc_running:
@@ -772,8 +806,19 @@ class ThreatEngine:
                 a["actor"] for a in recent_alerts
             ).most_common(5)
 
+            wifi_stats, risk = {}, {}
+            if getattr(self, "_wifi_monitor", None):
+                try:
+                    wifi_stats = self._wifi_monitor.get_stats()
+                    from core.wifi_risk import compute_risk_score
+                    risk = compute_risk_score(wifi_stats, recent_alerts,
+                        self._wifi_monitor.get_heatmap() if hasattr(self._wifi_monitor, "get_heatmap") else [])
+                except Exception:
+                    pass
             return {
                 "mode": "SIMULATION" if getattr(self, '_demo', False) else "LIVE",
+                "ips_mode": "IPS" if load_config().get("auto_block") else "IDS",
+                "wifi_risk": risk, "wifi_stats": wifi_stats,
                 "total_packets": self.packet_stats.get("total", 0),
                 "total_bytes":   self.packet_stats.get("bytes", 0),
                 "blocked_pkts":  self.packet_stats.get("blocked", 0),
@@ -791,6 +836,8 @@ class ThreatEngine:
                 "top_attackers": [{"ip": ip, "alerts": n} for ip, n in top_attackers],
                 "arp_hosts":     len(self.arp_table),
                 "active_conns":  len(self.proc_map),
+                "security": {"ips": self._ips.get_snapshot(), "devices": self._device_fp.get_all()[:20],
+                             "plugins": self._plugins},
             }
 
     def reload_sigs(self):

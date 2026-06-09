@@ -8,4 +8,6 @@ dist/
 sentinel_logs/ 
 dist/ 
 sentinel_logs/ 
-*.db 
+*.db
+.sentinel_key
+*.enc

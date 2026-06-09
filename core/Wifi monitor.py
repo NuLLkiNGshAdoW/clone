@@ -43,6 +43,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+from core.rssi_fingerprint import RSSIFingerprintEngine
+
 # ── Optional scapy import (same pattern as ThreatEngine) ────────────────────
 try:
     import scapy.all as scapy
@@ -313,6 +315,7 @@ class WiFiMonitor:
         """
         self.engine = engine
         self.trusted_db = TrustedDeviceDB()
+        self._rssi = RSSIFingerprintEngine()
 
         # ── State tables ──────────────────────────────────────────────────
         # BSSID → APRecord
@@ -360,6 +363,7 @@ class WiFiMonitor:
             "evil_twins":      0,
             "rogue_aps":       0,
             "mgmt_pps":        0,
+            "spatial_threats": 0,
         }
 
         logging.info("[WiFiMonitor] Initialized (scapy=%s)", SCAPY_AVAILABLE)
@@ -413,6 +417,9 @@ class WiFiMonitor:
 
     def get_trusted_devices(self) -> dict:
         return self.trusted_db.all_entries()
+
+    def get_heatmap(self) -> list:
+        return self._rssi.get_heatmap_data()
 
     # ── Capture loop ──────────────────────────────────────────────────────────
 
@@ -518,6 +525,20 @@ class WiFiMonitor:
 
         if not bssid or bssid == "ff:ff:ff:ff:ff:ff":
             return
+
+        for st in self._rssi.record(bssid, ssid, chan, rssi):
+            with self._lock:
+                if self._is_debounced(st.threat_type, st.bssid, now):
+                    continue
+                self.stats["spatial_threats"] += 1
+                if "EVIL" in st.threat_type or "SPOOF" in st.threat_type:
+                    self.stats["evil_twins"] += 1
+            self._alert(atype=st.threat_type, actor=st.bssid, sev=st.severity, size=len(pkt), detail=st.detail)
+            if st.severity == "CRITICAL" and self.engine and hasattr(self.engine, "block_attacker"):
+                try:
+                    self.engine.block_attacker(st.bssid, reason=st.detail[:100], threat_type=st.threat_type)
+                except Exception:
+                    pass
 
         with self._lock:
             # ── 1. Update AP database ─────────────────────────────────────

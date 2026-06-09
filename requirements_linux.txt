@@ -14,6 +14,8 @@ psutil>=5.9.0
 # Web API (опционально — нужен для Flask-сервера /api/stats)
 flask>=3.0.0
 flask-cors>=4.0.0
+cryptography>=42.0.0
+reportlab>=4.0.0
 
 # Уведомления (опционально, notify-send доступен через apt)
 # sudo apt install libnotify-bin

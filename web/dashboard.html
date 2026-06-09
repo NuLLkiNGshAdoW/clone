@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="ru"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SOC Sentinel</title>
+<style>
+:root{--bg:#050810;--card:#0D1528;--accent:#00D4FF;--danger:#FF3B5C;--safe:#00FF88;--text:#E8F4FD;--dim:#4A6FA5;--border:#1A2A4A}
+*{box-sizing:border-box;margin:0;padding:0}body{font-family:system-ui,sans-serif;background:var(--bg);color:var(--text);padding:12px 12px 80px}
+header{text-align:center;padding:12px 0}.logo{font-size:1.4rem;color:var(--accent)}h1{font-size:.8rem;letter-spacing:.12em}
+.net{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:10px;margin:8px 0;font-size:.75rem;color:var(--dim);text-align:center}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0}
+.card{background:var(--card);border-radius:14px;padding:14px;border:1px solid var(--border)}
+.card.wide{grid-column:1/-1}.val{font-size:1.4rem;font-weight:700;color:var(--accent)}.lbl{font-size:.65rem;color:var(--dim);margin-top:4px}
+.alert{padding:10px;border-bottom:1px solid var(--border);font-size:.8rem}
+.panel{display:none}.panel.active{display:block}
+nav{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--border);display:flex;justify-content:space-around;padding:10px 0}
+nav button{background:none;border:none;color:var(--dim);font-size:.65rem}nav button.active{color:var(--accent)}
+nav span{display:block;font-size:1.1rem}
+</style></head><body>
+<header><div class="logo">⬡</div><h1>SOC SENTINEL</h1></header>
+<div class="net" id="netInfo">📡 Подключитесь к <b style="color:var(--safe)">той же Wi-Fi</b> сети</div>
+<div id="p-dash" class="panel active">
+<div class="grid">
+<div class="card"><div class="val" id="pkts">0</div><div class="lbl">Пакетов</div></div>
+<div class="card"><div class="val" id="threats">0</div><div class="lbl">Угроз</div></div>
+<div class="card"><div class="val" id="blocked">0</div><div class="lbl">Блок</div></div>
+<div class="card"><div class="val" id="bytes">0</div><div class="lbl">MB</div></div>
+</div><div class="card wide" id="alerts"></div></div>
+<div id="p-info" class="panel"><div class="card wide" style="padding:16px;font-size:.85rem;line-height:1.6">
+<p>1. Телефон и ПК в одной Wi-Fi сети</p>
+<p style="margin-top:8px">2. Откройте:</p>
+<p id="mainUrl" style="color:var(--accent);font-size:1.1rem;margin:8px 0;word-break:break-all">—</p>
+</div></div>
+<nav>
+<button class="active" onclick="tab('dash',this)"><span>📊</span>Дашборд</button>
+<button onclick="tab('info',this)"><span>ℹ️</span>Подключение</button>
+</nav>
+<script>
+function tab(id,b){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById('p-'+id).classList.add('active');document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));b.classList.add('active')}
+async function loadNet(){try{const d=await(await fetch('/api/network')).json();document.getElementById('mainUrl').textContent=d.primary_url||'—';document.getElementById('netInfo').textContent='Сеть: '+d.hostname+' порт '+d.port}catch(e){}}
+async function refresh(){try{const s=await(await fetch('/api/stats')).json();document.getElementById('pkts').textContent=(s.packets||0).toLocaleString();document.getElementById('threats').textContent=(s.threats_critical||0)+(s.threats_high||0);document.getElementById('blocked').textContent=s.blocked_count||0;document.getElementById('bytes').textContent=(s.bytes_mb||0).toFixed(1);const al=document.getElementById('alerts');const L=s.recent_alerts||[];al.innerHTML=L.length?L.map(a=>'<div class="alert"><b>'+a.type+'</b> '+a.actor+' <small>'+a.time+'</small></div>').join(''):'<div class="alert" style="color:var(--dim)">Угроз нет ✓</div>'}catch(e){document.getElementById('alerts').innerHTML='<div class="alert" style="color:var(--danger)">Нет связи — проверьте Wi-Fi сеть</div>'}}
+loadNet();setInterval(refresh,3000);refresh();
+</script></body></html>

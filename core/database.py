@@ -27,6 +27,11 @@ class DatabaseManager:
         self._thread.start()
 
     def _ensure_db(self):
+        try:
+            from utils.crypto import decrypt_db_if_needed
+            decrypt_db_if_needed(self.path)
+        except Exception:
+            pass
         first = not self.path.exists()
         # allow concurrent access; check_same_thread=False for background writer
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False, isolation_level=None)

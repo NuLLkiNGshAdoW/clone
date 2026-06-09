@@ -6,7 +6,7 @@ TRANSLATIONS = {
     "en": {
         # navigation / pages
         "dash": "DASHBOARD", "analyzer": "PACKET ANALYZER", "threats": "THREATS & ALERTS",
-        "topology": "NETWORK MAP", "logs": "SYSTEM LOGS", "settings": "SETTINGS",
+        "web": "WEB ACCESS", "topology": "NETWORK MAP", "logs": "SYSTEM LOGS", "settings": "SETTINGS",
         "menu": "MENU", "assistant": "ASSISTANT",
         # common actions / labels
         "clear": "CLEAR", "export": "EXPORT", "filter": "FILTER:", "regex": "Regex",
@@ -105,7 +105,7 @@ TRANSLATIONS = {
     },
     "ru": {
         "dash": "ПАНЕЛЬ", "analyzer": "АНАЛИЗ ПАКЕТОВ", "threats": "УГРОЗЫ И ОПОВЕЩЕНИЯ",
-        "topology": "КАРТА СЕТИ", "logs": "СИСТЕМНЫЕ ЛОГИ", "settings": "НАСТРОЙКИ",
+        "web": "ВЕБ-ДОСТУП", "topology": "КАРТА СЕТИ", "logs": "СИСТЕМНЫЕ ЛОГИ", "settings": "НАСТРОЙКИ",
         "menu": "МЕНЮ", "assistant": "АССИСТЕНТ",
         "clear": "ОЧИСТИТЬ", "export": "ЭКСПОРТ", "filter": "ФИЛЬТР:", "regex": "Регекс",
         "pause": "ПАУЗА", "block": "ЗАБЛОКИРОВАТЬ", "unblock": "РАЗБЛОКИРОВАТЬ",
