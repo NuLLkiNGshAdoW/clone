@@ -1,0 +1,43 @@
+﻿python : [2026-04-11 21:40:32,781] ERROR: Unhandled exception in main
+строка:1 знак:1
++ python -u WifiSecuritySystem.py 2>&1 | Out-File -Encoding utf8 run_lo ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([2026-04-11 21:...ception in main:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Traceback (most recent call last):
+  File "C:\diplom 3\WifiSecuritySystem\WifiSecuritySystem.py", line 2239, in <module>
+    app = SentinelApp()
+  File "C:\diplom 3\WifiSecuritySystem\WifiSecuritySystem.py", line 2132, in __init__
+    self._build_ui()
+    ~~~~~~~~~~~~~~^^
+  File "C:\diplom 3\WifiSecuritySystem\WifiSecuritySystem.py", line 2172, in _build_ui
+    add("Analyzer", "anlz", AnalyzerPage)
+    ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\diplom 3\WifiSecuritySystem\WifiSecuritySystem.py", line 2165, in add
+    p = cls(parent, self.engine)
+  File "C:\diplom 3\WifiSecuritySystem\WifiSecuritySystem.py", line 1336, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "C:\diplom 3\WifiSecuritySystem\WifiSecuritySystem.py", line 1365, in _build
+    command=self._export).pack(side="right",padx=6)
+            ^^^^^^^^^^^^
+AttributeError: 'AnalyzerPage' object has no attribute '_export'
+Traceback (most recent call last):
+  File "C:\diplom 3\WifiSecuritySystem\WifiSecuritySystem.py", line 2239, in <module>
+    app = SentinelApp()
+  File "C:\diplom 3\WifiSecuritySystem\WifiSecuritySystem.py", line 2132, in __init__
+    self._build_ui()
+    ~~~~~~~~~~~~~~^^
+  File "C:\diplom 3\WifiSecuritySystem\WifiSecuritySystem.py", line 2172, in _build_ui
+    add("Analyzer", "anlz", AnalyzerPage)
+    ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\diplom 3\WifiSecuritySystem\WifiSecuritySystem.py", line 2165, in add
+    p = cls(parent, self.engine)
+  File "C:\diplom 3\WifiSecuritySystem\WifiSecuritySystem.py", line 1336, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "C:\diplom 3\WifiSecuritySystem\WifiSecuritySystem.py", line 1365, in _build
+    command=self._export).pack(side="right",padx=6)
+            ^^^^^^^^^^^^
+AttributeError: 'AnalyzerPage' object has no attribute '_export'

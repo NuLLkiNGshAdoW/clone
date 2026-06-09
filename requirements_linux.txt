@@ -1,0 +1,19 @@
+# SOC Sentinel v2 — зависимости для Kali Linux / Debian
+# Установка: pip install -r requirements_linux.txt --break-system-packages
+
+# GUI
+customtkinter>=5.2.2
+matplotlib>=3.8.0
+
+# Сетевой захват
+scapy>=2.5.0
+
+# Системная информация
+psutil>=5.9.0
+
+# Web API (опционально — нужен для Flask-сервера /api/stats)
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# Уведомления (опционально, notify-send доступен через apt)
+# sudo apt install libnotify-bin

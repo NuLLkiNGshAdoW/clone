@@ -1,0 +1,11 @@
+.vs/
+__pycache__/
+build/
+out/
+*.db-shm
+*.db-wal
+dist/ 
+sentinel_logs/ 
+dist/ 
+sentinel_logs/ 
+*.db 

@@ -1,0 +1,7 @@
+{
+    "python.defaultInterpreterPath": "C:\\diplom 3\\WifiSecuritySystem\\env1\\Scripts\\python.exe",
+    "python.analysis.extraPaths": [
+        "C:\\diplom 3\\WifiSecuritySystem\\env1\\Lib\\site-packages"
+    ],
+    "python.analysis.typeCheckingMode": "off"
+}
