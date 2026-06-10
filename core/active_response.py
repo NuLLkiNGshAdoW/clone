@@ -84,22 +84,30 @@ class ActiveResponse:
 
     def block_attacker(self, target: str, reason: str = "", severity: str = "HIGH",
                        threat_type: str = "IPS_BLOCK", use_firewall: Optional[bool] = None) -> dict:
+        import logging
+        logging.info(f"[ActiveResponse] block_attacker вызван для target={target}, reason={reason}")
         target = target.strip()
         if target in self.ignored:
+            logging.warning(f"[ActiveResponse] target={target} в ignored!")
             return {"ok": False, "target": target, "reason": "ignored"}
         cfg = self._cfg()
         fw = use_firewall if use_firewall is not None else cfg.get("auto_block_firewall", False)
         kind = "mac" if _is_mac(target) else ("ip" if _is_ipv4(target) else "unknown")
+        logging.info(f"[ActiveResponse] kind={kind}, fw={fw}")
         with self._lock:
             if kind == "ip":
                 self.blocked_ips.add(target)
+                logging.info(f"[ActiveResponse] Добавили {target} в self.blocked_ips! Теперь blocked_ips: {self.blocked_ips}")
             elif kind == "mac":
                 self.blocked_macs.add(target.upper().replace("-", ":"))
+                logging.info(f"[ActiveResponse] Добавили {target} в self.blocked_macs!")
             else:
+                logging.warning(f"[ActiveResponse] target={target} не является IP или MAC!")
                 return {"ok": False, "target": target, "kind": kind}
         firewall_ok = False
         if fw and kind == "ip":
             firewall_ok = _block_ip_windows(target) if sys.platform == "win32" else _block_ip_linux(target)
+            logging.info(f"[ActiveResponse] firewall_ok={firewall_ok}")
         rec = {"time": datetime.now().strftime("%H:%M:%S"), "type": threat_type,
                "target": target, "kind": kind, "severity": severity,
                "reason": reason or "IPS auto-block", "firewall": firewall_ok}
@@ -110,8 +118,9 @@ class ActiveResponse:
         if self._on_block:
             try:
                 self._on_block(rec)
+                logging.info(f"[ActiveResponse] Вызвали _on_block")
             except Exception:
-                pass
+                logging.exception("[ActiveResponse] _on_block ошибка")
         return {"ok": True, **rec}
 
     def unblock_target(self, target: str) -> bool:

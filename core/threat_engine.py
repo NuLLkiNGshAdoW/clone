@@ -321,9 +321,13 @@ class ThreatEngine:
                 self.blocked_ips.add(rec.get("target", ""))
 
     def block_attacker(self, target, reason="", severity="HIGH", threat_type="IPS_BLOCK"):
+        import logging
+        logging.info(f"[ThreatEngine] block_attacker вызван для target={target}, reason={reason}")
         res = self._ips.block_attacker(target, reason=reason, severity=severity, threat_type=threat_type)
+        logging.info(f"[ThreatEngine] Результат block_attacker: {res}")
         if res.get("ok") and res.get("kind") == "ip":
             self.blocked_ips.add(target)
+            logging.info(f"[ThreatEngine] Добавили {target} в self.blocked_ips! Теперь blocked_ips: {self.blocked_ips}")
         return res
 
     def unblock_target(self, target):
@@ -951,22 +955,26 @@ class ThreatEngine:
             logging.exception("Error shutting down executor")
 
     def _init_telegram(self):
+        logging.info("[TelegramBot] _init_telegram вызван!")
         try:
             from utils.config import load_config
             cfg = load_config()
             token = cfg.get("tg_token", "")
             chat_id = cfg.get("tg_chat_id", "")
+            logging.info(f"[TelegramBot] token: {len(token) >0}, chat_id: {len(chat_id)>0}")
             if token and chat_id:
                 from core.telegram_bot import TelegramBot
                 self._tg_bot = TelegramBot(token=token, chat_id=chat_id, engine=self)
                 self._tg_bot.start()
-                logging.info("[TelegramBot] Started")
+                logging.info("[TelegramBot] Started _tg_bot")
         except Exception:
-            logging.exception("[TelegramBot] init failed")
+            logging.exception("[TelegramBot] _init_telegram failed")
 
     def reload_telegram(self):
+        logging.info("[TelegramBot] reload_telegram вызван!")
         try:
             if self.bot:
+                logging.info("[TelegramBot] останавливаем self.bot")
                 self.bot.stop()
                 self.bot = None
                 from utils.config import load_config
@@ -977,11 +985,14 @@ class ThreatEngine:
                     from core.telegram_bot import TelegramBot
                     self.bot = TelegramBot(token=token, chat_id=chat_id, engine=self)
                     self.bot.start()
+                    logging.info("[TelegramBot] self.bot запущен")
                     return
             if self._tg_bot:
+                logging.info("[TelegramBot] останавливаем self._tg_bot")
                 self._tg_bot.stop()
                 self._tg_bot = None
         except Exception:
-            pass
+            logging.exception("[TelegramBot] reload_telegram error")
         if self.bot is None:
+            logging.info("[TelegramBot] self.bot is None, вызов _init_telegram")
             self._init_telegram()

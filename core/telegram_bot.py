@@ -130,29 +130,37 @@ class TelegramBot:
 
     def _handle_callback(self, cb: dict):
         """Обработка callback запроса"""
+        logging.info(f"[TelegramBot] _handle_callback вызван: cb=%s", cb)
         try:
             data, cb_id = cb.get("data", ""), cb.get("id")
+            logging.info(f"[TelegramBot] data=%s, cb_id=%s", data, cb_id)
             if data.startswith("block:"):
                 target = data.split("block:", 1)[1].strip()
+                logging.info(f"[TelegramBot] target=%s, self.engine exists=%s", target, self.engine is not None)
                 if target and self.engine:
                     if hasattr(self.engine, "block_attacker"):
+                        logging.info(f"[TelegramBot] Вызываем engine.block_attacker для target=%s", target)
                         res = self.engine.block_attacker(target, reason="Telegram block", threat_type="TG_BLOCK")
+                        logging.info(f"[TelegramBot] Результат block_attacker=%s", res)
                         msg = f"🚫 {target} ({res.get('kind', 'unknown')})"
                     elif hasattr(self.engine, "block_ip"):
+                        logging.info(f"[TelegramBot] Вызываем engine.block_ip для target=%s", target)
                         self.engine.block_ip(target)
                         msg = f"🚫 {target}"
                     else:
+                        logging.warning(f"[TelegramBot] engine не имеет block_attacker или block_ip!")
                         msg = f"❌ block_attacker not available"
                     self._answer_callback(cb_id, msg)
             elif data.startswith("ignore:"):
                 target = data.split("ignore:", 1)[1].strip()
                 if target and self.engine and hasattr(self.engine, "_ips"):
+                    logging.info(f"[TelegramBot] Вызываем engine._ips.ignore_target для target=%s", target)
                     self.engine._ips.ignore_target(target)
                     self._answer_callback(cb_id, f"✅ {target} проигнорирован")
                 else:
                     self._answer_callback(cb_id, f"❌ ignore failed")
         except Exception as e:
-            logging.warning("[TelegramBot] handle_callback error: %s", e)
+            logging.exception("[TelegramBot] handle_callback error")
 
     def _answer_callback(self, cb_id: str, text: str):
         """Ответить на callback запрос"""
