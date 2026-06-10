@@ -179,7 +179,7 @@ class ThreatEngine:
         self.app_counts_recent = collections.defaultdict(int)  # скользящее окно 60 сек
         self._app_recent_ts: deque = deque()  # [(timestamp, app_name), ...]
         self._APP_WINDOW = 60.0  # секунд — окно для "recent" графика
-        self.port_scan_track = collections.defaultdict(set)
+        self.port_scan_track = collections.defaultdict(deque)  # deque of (timestamp, dport)
         self.syn_track = collections.defaultdict(deque)
         self.ip_ts = collections.defaultdict(list)
         self.arp_table = {}
@@ -339,6 +339,19 @@ class ThreatEngine:
             self.packet_count += 1
             self.packet_stats["total"] += 1
             self.packet_stats["bytes"] += size
+
+            # ── CHECK WHITELIST FIRST (IGNORE COMPLETELY IF WHITELISTED) ──
+            src_ip = None
+            src_mac = None
+            if pkt.haslayer(scapy.IP):
+                src_ip = pkt[scapy.IP].src
+            if hasattr(pkt, 'src') and pkt.src:
+                src_mac = pkt.src
+            # Check both IP and MAC for whitelist
+            if (src_ip and is_whitelisted(src_ip)) or (src_mac and is_whitelisted(src_mac)):
+                logging.debug("[Whitelist] Ignoring packet from whitelisted %s/%s", src_ip, src_mac)
+                return " SAFE", "#0F0", []
+
             # per-IP rate tracking (packets per second sliding window)
             if pkt.haslayer(scapy.IP):
                 src = pkt[scapy.IP].src
@@ -394,9 +407,26 @@ class ThreatEngine:
                     self.syn_track[src] = deque([t for t in self.syn_track[src] if now-t < 2], maxlen=500)
                     if len(self.syn_track[src]) >= self.SIGS.get("SYN_FLOOD", {}).get("thresh", 100):
                         threats.append(("SYN_FLOOD", src, "CRITICAL"))
-                self.port_scan_track[src].add(dport)
-                if len(self.port_scan_track[src]) >= self.SIGS.get("PORT_SCAN", {}).get("thresh", 15):
-                    threats.append(("PORT_SCAN", src, "HIGH"))
+                
+                # PORT SCAN DETECTION (fixed):
+                # 1. Add (timestamp, dport)
+                # 2. Filter out entries older than window (from config, default 5s)
+                # 3. Count UNIQUE ports in that window
+                scan_window = self.SIGS.get("PORT_SCAN", {}).get("window", 5)
+                self.port_scan_track[src].append((now, dport))
+                # Remove old entries
+                while self.port_scan_track[src] and (now - self.port_scan_track[src][0][0]) > scan_window:
+                    self.port_scan_track[src].popleft()
+                # Get unique ports in window
+                unique_ports = set()
+                for ts, dp in self.port_scan_track[src]:
+                    unique_ports.add(dp)
+                # Also, skip localhost/web ports (to avoid false positives from our own web UI)
+                cfg_web_port = load_config().get("web_port", 5000)
+                if len(unique_ports) >= self.SIGS.get("PORT_SCAN", {}).get("thresh", 15):
+                    # Check if it's NOT just hitting web port (5000) or localhost
+                    if not (src in ("127.0.0.1", "::1") or (len(unique_ports) == 1 and cfg_web_port in unique_ports)):
+                        threats.append(("PORT_SCAN", src, "HIGH"))
                 if dport in (22, 3389, 21, 23):
                     key = f"bf_{src}_{dport}"
                     self.ip_ts[key].append(now)

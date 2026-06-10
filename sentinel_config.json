@@ -28,5 +28,7 @@
   "web_enabled": true,
   "web_firewall": true,
   "device_fingerprint_enabled": true,
-  "behavior_score_threshold": 70
+  "behavior_score_threshold": 70,
+  "web_autostart": false,
+  "web_log_requests": false
 }
