@@ -1854,6 +1854,8 @@ class ThreatPage(ctk.CTkFrame):
         for a in self.engine.alerts:
             sev = a.get("severity","low").lower(); counts[sev] = counts.get(sev,0)+1
         for sev,card in self.sev_cards.items(): card.set(str(counts.get(sev,0)))
+        # Also refresh blocked IPs list!
+        self._refresh_blocked()
         self.after(2000,self._tick)
 
 class WebAccessPage(ctk.CTkFrame):
