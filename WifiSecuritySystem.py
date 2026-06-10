@@ -498,9 +498,11 @@ except Exception:
 class KPICard(ctk.CTkFrame):
     def __init__(self, master, title, value="0", color=None, icon="", subtitle="", **kw):
         color = color or T["accent"]
+        self._current_color = color
         super().__init__(master, fg_color=T["bg_card"], corner_radius=DEFAULT_CORNER,
                          border_width=1, border_color=T["border"], **kw)
-        ctk.CTkFrame(self, fg_color=color, height=3, corner_radius=0).pack(fill="x")
+        self._color_bar = ctk.CTkFrame(self, fg_color=color, height=3, corner_radius=0)
+        self._color_bar.pack(fill="x")
         inner = ctk.CTkFrame(self, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=16, pady=12)
         top = ctk.CTkFrame(inner, fg_color="transparent"); top.pack(fill="x")
@@ -537,6 +539,12 @@ class KPICard(ctk.CTkFrame):
     def set(self, v, subtitle=None):
         self._val.configure(text=str(v))
         if subtitle and self._sub: self._sub.configure(text=str(subtitle))
+
+    def set_color(self, color):
+        self._current_color = color
+        self._color_bar.configure(fg_color=color)
+        self._val.configure(text_color=color)
+        self._icon_label.configure(text_color=color)
 
     def refresh_ui(self):
         try:
@@ -1967,10 +1975,14 @@ class WebAccessPage(ctk.CTkFrame):
 
     def _refresh_info(self):
         import sys
-        import flask
         info_text = []
         info_text.append(f"Python: {sys.version.split()[0]}")
-        info_text.append(f"Flask: {flask.__version__}")
+        try:
+            from importlib.metadata import version
+            flask_version = version("flask")
+        except Exception:
+            flask_version = "unknown"
+        info_text.append(f"Flask: {flask_version}")
         port = int(CFG.get("web_port", 5000))
         info_text.append(f"Port: {port}")
         info_text.append(f"Autostart: {('Yes' if CFG.get('web_autostart', False) else 'No')}")
