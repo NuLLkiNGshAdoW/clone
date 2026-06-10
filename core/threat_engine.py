@@ -16,6 +16,7 @@ from core.device_fingerprint import DeviceFingerprinter
 from core.plugin_loader import load_all_plugins
 from pathlib import Path
 import re
+from core.whitelist import is_whitelisted
 
 # Simple OUI vendor map loader (small footprint) — supports partial matches for common vendors
 _OUI_CACHE = {}
@@ -438,7 +439,7 @@ class ThreatEngine:
             # ── ИСПРАВЛЕНИЕ: используем кешированный конфиг ──
             if cfg.get("auto_block") and threats:
                 for ttype, actor, sev in threats:
-                    if sev in ("CRITICAL", "HIGH") and not self._ips.is_ignored(actor):
+                    if sev in ("CRITICAL", "HIGH") and actor not in self._ips.ignored:
                         self.block_attacker(actor, reason=ttype, severity=sev, threat_type=ttype)
             for ttype, actor, sev in threats:
                 self._raise_alert(ttype, actor, sev, size)
@@ -698,6 +699,13 @@ class ThreatEngine:
             except Exception:
                 logging.exception("Alert callback failed")
         target_bot = self.bot or self._tg_bot
+        # If actor is whitelisted, skip sending Telegram notifications
+        try:
+            if actor and is_whitelisted(actor):
+                logging.info("[Whitelist] actor %s is whitelisted; skipping notifications", actor)
+                return
+        except Exception:
+            pass
         if target_bot and sev in ("CRITICAL", "HIGH"):
             threading.Thread(target=target_bot.send_alert, args=(a,), daemon=True).start()
 

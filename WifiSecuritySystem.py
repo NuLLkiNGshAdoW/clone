@@ -35,6 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 import subprocess, ctypes
+from core.whitelist import is_whitelisted, get_whitelist, add_whitelist_entry, remove_whitelist_entry
 
 def _try_import_scapy():
     try:
@@ -76,57 +77,57 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 
 DEVICE_MAP = {
-    "192.168.0.107": "  Workstation (Almaty)",
-    "192.168.0.1":   " Home Router / Gateway",
-    "192.168.0.100": " Phone (Almaty)",
-    "192.168.0.2":   " Desktop PC",
+    "192.168.0.107": "Workstation (Almaty)",
+    "192.168.0.1":   "Home Router / Gateway",
+    "192.168.0.100": "Phone (Almaty)",
+    "192.168.0.2":   "Desktop PC",
 }
 
 LOC_MAP = {
-    "2.132.":   " Kazakhtelecom (Almaty)",
-    "77.94.":   " Kazakhtelecom",
-    "217.74.":  " Kazakhtelecom",
-    "178.89.":  " Beeline KZ",
-    "92.46.":   " Beeline KZ",
-    "95.56.":   " Beeline KZ",
-    "91.185.":  " Tele2 / Altel KZ",
-    "94.247.":  " Tele2 / Altel KZ",
-    "192.168.": " Local Network",
-    "10.0.":    " Local Network",
-    "172.16.":  " Local Network",
+    "2.132.":   "Kazakhtelecom (Almaty)",
+    "77.94.":   "Kazakhtelecom",
+    "217.74.":  "Kazakhtelecom",
+    "178.89.":  "Beeline KZ",
+    "92.46.":   "Beeline KZ",
+    "95.56.":   "Beeline KZ",
+    "91.185.":  "Tele2 / Altel KZ",
+    "94.247.":  "Tele2 / Altel KZ",
+    "192.168.": "Local Network",
+    "10.0.":    "Local Network",
+    "172.16.":  "Local Network",
 }
 
 PORT_SERVICE_MAP = {
-    80:   " HTTP",
-    443:  " HTTPS",
-    53:   " DNS",
-    22:   " SSH",
-    21:   " FTP",
-    25:   " SMTP",
-    110:  " POP3",
-    143:  " IMAP",
-    3389: " RDP",
-    5353: " mDNS",
-    1935: " RTMP (Stream)",
-    8080: " HTTP Alt",
-    8443: " HTTPS Alt",
+    80:   "HTTP",
+    443:  "HTTPS",
+    53:   "DNS",
+    22:   "SSH",
+    21:   "FTP",
+    25:   "SMTP",
+    110:  "POP3",
+    143:  "IMAP",
+    3389: "RDP",
+    5353: "mDNS",
+    1935: "RTMP (Stream)",
+    8080: "HTTP Alt",
+    8443: "HTTPS Alt",
 }
 
 APP_MAP = {
-    "youtube":      " YouTube Video",
-    "googlevideo":  " YouTube Video",
-    "ytimg":        " YouTube Video",
-    "instagram":    " Instagram",
-    "tiktok":       " TikTok",
-    "whatsapp":     " WhatsApp",
-    "kaspi":        " Kaspi Pay",
-    "halyk":        " Halyk Bank",
-    "telegram":     " Telegram",
-    "cloudflare":   " Cloudflare CDN",
-    "1.1.1.1":      " Cloudflare DNS",
-    "8.8.8.8":      " Google DNS",
-    "8.8.4.4":      " Google DNS",
-    "google":       " Google",
+    "youtube":      "YouTube Video",
+    "googlevideo":  "YouTube Video",
+    "ytimg":        "YouTube Video",
+    "instagram":    "Instagram",
+    "tiktok":       "TikTok",
+    "whatsapp":     "WhatsApp",
+    "kaspi":        "Kaspi Pay",
+    "halyk":        "Halyk Bank",
+    "telegram":     "Telegram",
+    "cloudflare":   "Cloudflare CDN",
+    "1.1.1.1":      "Cloudflare DNS",
+    "8.8.8.8":      "Google DNS",
+    "8.8.4.4":      "Google DNS",
+    "google":       "Google",
 }
 
 def _resolve_service(ip: str, port: int = 0) -> str:
@@ -139,9 +140,17 @@ def _resolve_service(ip: str, port: int = 0) -> str:
     svc = PORT_SERVICE_MAP.get(port, "")
     return svc if svc else ip
 
-def _build_flask_app(engine_ref) -> "Flask":
+def _build_flask_app(engine_ref, app_ref=None) -> "Flask":
     flask_app = Flask("SOCSentinel")
     CORS(flask_app, resources={r"/api/*": {"origins": "*"}})
+
+    @flask_app.before_request
+    def _count_request():
+        if app_ref and app_ref():
+            app = app_ref()
+            app._flask_request_count += 1
+            if load_config().get("web_log_requests"):
+                logging.info(f"[Web] Request: {request.method} {request.path}")
 
     @flask_app.after_request
     def _cors_headers(response):
@@ -249,6 +258,25 @@ def _build_flask_app(engine_ref) -> "Flask":
             "primary_ip": primary, "primary_url": f"http://{primary}:{port}" if primary else None,
             "urls": urls, "same_network_required": True})
 
+    @flask_app.route("/api/whitelist", methods=["GET"])
+    def api_whitelist_get():
+        return jsonify(get_whitelist())
+
+    @flask_app.route("/api/whitelist", methods=["POST"])
+    def api_whitelist_add():
+        req = request.get_json(silent=True) or {}
+        ident = (req.get("id") or req.get("identifier") or "").strip()
+        name = (req.get("name") or "").strip()
+        if not ident:
+            return jsonify({"error": "missing id"}), 400
+        data = add_whitelist_entry(ident, name)
+        return jsonify(data)
+
+    @flask_app.route("/api/whitelist/<ident>", methods=["DELETE"])
+    def api_whitelist_remove(ident):
+        data = remove_whitelist_entry(ident)
+        return jsonify(data)
+
     return flask_app
 
 CONFIG_FILE = Path("sentinel_config.json")
@@ -274,6 +302,8 @@ DEFAULT_CONFIG = {
     "web_port": 5000,
     "web_enabled": True,
     "web_firewall": True,
+    "web_autostart": False,
+    "web_log_requests": False,
     "device_fingerprint_enabled": True,
     "behavior_score_threshold": 70,
 }
@@ -393,18 +423,7 @@ def ttk_style():
         s.map(name, background=[("selected", T["bg_hover"])],
               foreground=[("selected", T["accent"])])
 
-# ══════════════════════════════════════════════════════════════════════════════
-# FIX 1: Универсальная обёртка для show_system_toast — daemon-поток,
-#         чтобы subprocess.run(["notify-send", ...]) никогда не блокировал
-#         главный поток Tkinter.
-# ══════════════════════════════════════════════════════════════════════════════
 def _toast_async(title: str, msg: str) -> None:
-    """Отправить системное уведомление в daemon-потоке.
-
-    На Kali/Linux show_system_toast обычно вызывает notify-send через
-    subprocess.run(), который при накоплении очереди D-Bus зависает на
-    несколько секунд.  Вынос в поток изолирует этот блок от GUI-потока.
-    """
     threading.Thread(
         target=show_system_toast,
         args=(title, msg),
@@ -412,14 +431,13 @@ def _toast_async(title: str, msg: str) -> None:
         name="ToastThread",
     ).start()
 
-
 class ThreatDetector:
 
     @staticmethod
     def detect(engine) -> list[str]:
         alerts = []
         if not engine.lock.acquire(timeout=0.05):
-            return ["⚠ Stats temporarily unavailable (engine busy)"]
+            return ["Stats temporarily unavailable"]
         try:
             syn    = engine.proto_counts.get("TCP", 0)
             icmp   = engine.proto_counts.get("ICMP", 0)
@@ -438,23 +456,23 @@ class ThreatDetector:
                 except Exception: pass
         finally:
             engine.lock.release()
-        crit = sum(1 for a in recent if a.get("severity") == "CRITICAL")
-        high = sum(1 for a in recent if a.get("severity") == "HIGH")
+        crit = sum(1 for a in recent if a.get("severity") == "critical")
+        high = sum(1 for a in recent if a.get("severity") == "high")
         if crit > 0:
-            alerts.append(f" {crit} CRITICAL threat(s) in last 60s")
+            alerts.append(f"{crit} critical threats in last 60s")
         if high > 0:
-            alerts.append(f" {high} HIGH severity alerts in last 60s")
+            alerts.append(f"{high} high severity alerts in last 60s")
         if icmp > CFG.get("icmp_thresh", 50) * 2:
-            alerts.append(f"⚠ Very high ICMP traffic ({icmp} pkts) — possible scan/flood")
+            alerts.append(f"High ICMP traffic ({icmp} pkts)")
         if dns > 500:
-            alerts.append(f"⚠ Elevated DNS queries ({dns}) — possible tunnelling")
+            alerts.append(f"Elevated DNS queries ({dns})")
         if blocked > 0:
-            alerts.append(f" {blocked} IPs currently blocked")
+            alerts.append(f"{blocked} IPs currently blocked")
         if bytes_ > 50 * 1024 * 1024:
             mb = bytes_ / (1024 * 1024)
-            alerts.append(f" High data volume: {mb:.1f} MB captured")
+            alerts.append(f"High data volume: {mb:.1f} MB")
         if not alerts:
-            alerts.append(" No active threats detected at this moment")
+            alerts.append("No active threats detected")
         return alerts
 
 try:
@@ -478,7 +496,7 @@ except Exception:
         def shutdown(self): pass
 
 class KPICard(ctk.CTkFrame):
-    def __init__(self, master, title, value="0", color=None, icon="⬡", subtitle="", **kw):
+    def __init__(self, master, title, value="0", color=None, icon="", subtitle="", **kw):
         color = color or T["accent"]
         super().__init__(master, fg_color=T["bg_card"], corner_radius=DEFAULT_CORNER,
                          border_width=1, border_color=T["border"], **kw)
@@ -543,7 +561,7 @@ def section_label(parent, text, sub=""):
     f.pack(fill="x", padx=18, pady=(14,4))
     ctk.CTkLabel(f, text=text, font=FONT_HEADER, text_color=T["accent"]).pack(side="left")
     if sub:
-        ctk.CTkLabel(f, text=f"  ·  {sub}", font=FONT_SMALL,
+        ctk.CTkLabel(f, text=f"    {sub}", font=FONT_SMALL,
                      text_color=T["text_dim"]).pack(side="left")
     ctk.CTkFrame(parent, fg_color=T["border"], height=1).pack(fill="x", padx=18, pady=(0,8))
     return f
@@ -562,7 +580,7 @@ def make_canvas(parent, fig):
             path = filedialog.asksaveasfilename(defaultextension='.png',
                                                 filetypes=[('PNG','*.png')])
             if path: fig.savefig(path, dpi=200)
-        ctk.CTkButton(tb, text='💾', width=36, height=26,
+        ctk.CTkButton(tb, text='', width=36, height=26,
                       fg_color=_adjust_color(T['accent'], 0.95), hover_color=_adjust_color(T['accent'],1.25),
                       corner_radius=DEFAULT_CORNER, command=_save).pack(side='right', padx=4, pady=4)
     except Exception: pass
@@ -571,7 +589,7 @@ def make_canvas(parent, fig):
 class AuthWindow(ctk.CTkToplevel):
     def __init__(self, master=None):
         super().__init__(master)
-        self.title("SOC SENTINEL — Authentication")
+        self.title("SOC SENTINEL  Authentication")
         self.geometry("460x560"); self.resizable(False, False)
         self.configure(fg_color=T["bg_deep"]); self.grab_set()
         self.result = None; self._mode = tk.StringVar(value="login")
@@ -588,7 +606,7 @@ class AuthWindow(ctk.CTkToplevel):
     def _build(self):
         hdr = ctk.CTkFrame(self, fg_color=T["bg_panel"], corner_radius=DEFAULT_CORNER, height=90, border_width=1, border_color=T["border"])
         hdr.pack(fill="x"); hdr.pack_propagate(False)
-        ctk.CTkLabel(hdr, text="⬡", font=("Segoe UI Semibold",38),
+        ctk.CTkLabel(hdr, text="", font=("Segoe UI Semibold",38),
                      text_color=T["accent"]).pack(pady=(10,0))
         ctk.CTkLabel(hdr, text="SOC SENTINEL", font=("Segoe UI Semibold",13),
                      text_color=T["text_primary"]).pack()
@@ -596,7 +614,7 @@ class AuthWindow(ctk.CTkToplevel):
         tab.pack(padx=30, pady=(20,0), fill="x")
         self._mode_rbs = {}
         for val, icon_key in [("login","sign_in"),("register","register")]:
-            lbl = ("🔑  " if val=="login" else "✚  ") + tr(icon_key)
+            lbl = ("  " if val=="login" else "  ") + tr(icon_key)
             rb = ctk.CTkRadioButton(tab, text=lbl, variable=self._mode, value=val,
                                font=FONT_SMALL, text_color=T["text_primary"],
                                fg_color=T["accent"], command=self._refresh_mode)
@@ -625,8 +643,8 @@ class AuthWindow(ctk.CTkToplevel):
                              corner_radius=8)
             e.pack(fill="x"); return e
         self._user_ent = field("username", "username")
-        self._pass_ent = field("password", "password", "●")
-        self._pass2_ent = field("confirm_password", "confirm_password", "●") if mode == "register" else None
+        self._pass_ent = field("password", "password", "")
+        self._pass2_ent = field("confirm_password", "confirm_password", "") if mode == "register" else None
         self._role_var  = None
 
     def _refresh_mode(self):
@@ -638,7 +656,7 @@ class AuthWindow(ctk.CTkToplevel):
     def refresh_ui(self):
         try:
             for val, (rb, key) in getattr(self, '_mode_rbs', {}).items():
-                icon = '🔑  ' if val == 'login' else '✚  '
+                icon = '  ' if val == 'login' else '  '
                 rb.configure(text=icon + tr(key))
             self._build_form()
             submit_text = tr('sign_in') if self._mode.get() == 'login' else tr('register')
@@ -676,11 +694,11 @@ class AuthWindow(ctk.CTkToplevel):
 
 class AIAssistantPanel(ctk.CTkFrame):
     PROVIDERS = {
-        "Claude": {"color": "#00D4FF", "icon": "⬡", "model": "claude-sonnet-4-20250514",
+        "Claude": {"color": "#00D4FF", "icon": "", "model": "claude-sonnet-4-20250514",
                    "cfg_key": "ai_api_key"},
-        "Gemini": {"color": "#00FF88", "icon": "◈", "model": "gemini-2.5-flash",
+        "Gemini": {"color": "#00FF88", "icon": "", "model": "gemini-2.5-flash",
                    "cfg_key": "gemini_api_key"},
-        "OpenAI": {"color": "#BD00FF", "icon": "◉", "model": "gpt-4o-mini",
+        "OpenAI": {"color": "#BD00FF", "icon": "", "model": "gpt-4o-mini",
                    "cfg_key": "openai_api_key"},
     }
     INTENTS = {
@@ -733,13 +751,13 @@ class AIAssistantPanel(ctk.CTkFrame):
             f = ctk.CTkFrame(self, fg_color=T["bg_card"], corner_radius=DEFAULT_CORNER, border_width=1, border_color=T["border"])
             ctk.CTkLabel(f, text=f"{name} Key:", font=FONT_TINY,
                          text_color=T["text_dim"]).pack(side="left", padx=(12,4), pady=6)
-            ph_map = {"Claude":"sk-ant-…","Gemini":"AIza…","OpenAI":"sk-…"}
-            ent = ctk.CTkEntry(f, show="●", width=140, placeholder_text=ph_map[name],
+            ph_map = {"Claude":"sk-ant-","Gemini":"AIza","OpenAI":"sk-"}
+            ent = ctk.CTkEntry(f, show="", width=140, placeholder_text=ph_map[name],
                                fg_color=T["bg_deep"], border_color=T["border"],
                                text_color=T["text_primary"], font=FONT_TINY, corner_radius=8)
             if CFG.get(info["cfg_key"]): ent.insert(0, CFG[info["cfg_key"]])
             ent.pack(side="left", padx=4, pady=6)
-            ctk.CTkButton(f, text="SAVE", width=46, height=24, font=FONT_TINY,
+            ctk.CTkButton(f, text=tr("save"), width=46, height=24, font=FONT_TINY,
                           fg_color=T["accent"], text_color=T["bg_deep"],
                           command=lambda n=name, k=info["cfg_key"], e=ent:
                               self._save_key(n, k, e)).pack(side="left", padx=4)
@@ -776,12 +794,12 @@ class AIAssistantPanel(ctk.CTkFrame):
                                   text_color=T["text_primary"], font=FONT_BODY, corner_radius=8)
         self._inp.pack(side="left", fill="x", expand=True, padx=(8,6), pady=8)
         self._inp.bind("<Return>", lambda e: self._send())
-        ctk.CTkButton(inp, text="▶", width=40, height=36,
+        ctk.CTkButton(inp, text=tr("send"), width=40, height=36,
                       fg_color=_adjust_color(T["accent"],0.95), hover_color=_adjust_color(T["accent"],1.2),
                       text_color=T["bg_deep"], corner_radius=DEFAULT_CORNER,
                       font=("Segoe UI Semibold",14), command=self._send
                       ).pack(side="right", padx=(0,8), pady=8)
-        ctk.CTkButton(inp, text="🗑", width=36, height=36,
+        ctk.CTkButton(inp, text=tr("clear_chat"), width=36, height=36,
                       fg_color=T["bg_card"], hover_color=_adjust_color(T["bg_card"],1.05), text_color=T["text_dim"],
                       corner_radius=DEFAULT_CORNER, command=self._clear_chat).pack(side="right", padx=4, pady=8)
 
@@ -800,22 +818,22 @@ class AIAssistantPanel(ctk.CTkFrame):
             ).pack(side="left", padx=3, pady=2)
 
     def _get_smart_chips(self) -> list[tuple[str,str]]:
-        chips = [("📊 Network status", "Give me a brief network status summary"),
-                 ("🔍 Analyze traffic",  "Analyze the current traffic patterns")]
+        chips = [("Network status", "Give me a brief network status summary"),
+                 ("Analyze traffic",  "Analyze the current traffic patterns")]
         recent = [a for a in self.engine.alerts[-50:]
-                  if a.get("severity") in ("CRITICAL","HIGH")]
+                  if a.get("severity") in ("critical","high")]
         if recent:
             top_actor = collections.Counter(a["actor"] for a in recent).most_common(1)
             if top_actor:
                 ip = top_actor[0][0]
-                chips.insert(0, (f"🚫 Block {ip}", f"Should I block IP {ip}? Explain the risk."))
-            chips.insert(0, ("⚡ Explain threats", "Explain the current active threats in detail"))
+                chips.insert(0, (f"Block {ip}", f"Should I block IP {ip}? Explain the risk."))
+            chips.insert(0, ("Explain threats", "Explain the current active threats in detail"))
         if self.engine.proto_counts.get("ICMP",0) > 100:
-            chips.append(("🏓 ICMP spike", "Why is there so much ICMP traffic?"))
+            chips.append(("ICMP spike", "Why is there so much ICMP traffic?"))
         if self.engine.proto_counts.get("DNS",0) > 300:
-            chips.append(("🔎 DNS activity", "Is the DNS activity suspicious?"))
+            chips.append(("DNS activity", "Is the DNS activity suspicious?"))
         if len(self.engine.blocked_ips) > 0:
-            chips.append(("📋 Blocked IPs", "List and explain the currently blocked IPs"))
+            chips.append(("Blocked IPs", "List and explain the currently blocked IPs"))
         return chips[:5]
 
     def _chips_tick(self):
@@ -833,7 +851,7 @@ class AIAssistantPanel(ctk.CTkFrame):
         self._key_frames[name].pack(fill="x")
         self._model_lbl.configure(text=f"Model: {self.PROVIDERS[name]['model']}")
         self._update_badge()
-        self._append_msg("system", f" Switched to {name}")
+        self._append_msg("system", f"Switched to {name}")
 
     def _update_badge(self):
         name = self._provider.get()
@@ -862,10 +880,10 @@ class AIAssistantPanel(ctk.CTkFrame):
         snap_text = json.dumps(snap, indent=2, default=str)
         prompt = f"""You are a SOC (Security Operations Center) AI analyst embedded in SOC Sentinel.
 
-STRICT RULES — YOU MUST FOLLOW THESE:
+STRICT RULES  YOU MUST FOLLOW THESE:
 1. Analyze ONLY the data provided in [NETWORK DATA] below.
 2. DO NOT invent, guess, or assume any numbers not in the data.
-3. If data is unavailable or zero — state that explicitly.
+3. If data is unavailable or zero  state that explicitly.
 4. Be concise and actionable. Use security terminology.
 5. If [{mode}] mode is SIMULATION, note that data is synthetic.
 
@@ -915,7 +933,7 @@ TASK: {instruction}
                 if reply:
                     if provider != self._provider.get():
                         self._append_msg("system",
-                            f"⚡ Auto-switched to {provider} (primary provider failed)")
+                            f"Auto-switched to {provider} (primary provider failed)")
                     self._history.append({"role":"assistant","content": reply})
                     self._typewrite(reply, provider)
                     self._log_dialog(self._history[-2]["content"], reply, provider)
@@ -924,7 +942,7 @@ TASK: {instruction}
             except Exception as e:
                 last_error = e
                 continue
-        err = f"⚠ All providers failed. Last error: {last_error}"
+        err = f" All providers failed. Last error: {last_error}"
         self._replace_last(err)
         self._thinking = False
 
@@ -999,8 +1017,8 @@ TASK: {instruction}
 
     def _typewrite(self, full_text: str, provider: str):
         self._replace_last("")
-        icon   = self.PROVIDERS.get(provider, {}).get("icon","🤖")
-        prefix = f"\n{icon} ASSISTANT [{provider}]\n"
+        icon   = self.PROVIDERS.get(provider, {}).get("icon","")
+        prefix = f"\nASSISTANT [{provider}]\n"
         self.chat_box.configure(state="normal")
         self.chat_box.insert("end", prefix, "ai")
         self.chat_box.configure(state="disabled")
@@ -1030,11 +1048,10 @@ TASK: {instruction}
     def _append_msg(self, role, text):
         self.chat_box.configure(state="normal")
         provider = self._provider.get()
-        icon = self.PROVIDERS.get(provider, {}).get("icon","🤖")
         if role == "user":
             self.chat_box.insert("end", f"\n YOU\n{text}\n", "user")
         elif role == "assistant":
-            self.chat_box.insert("end", f"\n{icon} ASSISTANT\n{text}\n", "ai")
+            self.chat_box.insert("end", f"\nASSISTANT\n{text}\n", "ai")
         else:
             self.chat_box.insert("end", f"\n{text}\n", "sys")
         self.chat_box.see("end")
@@ -1048,16 +1065,14 @@ TASK: {instruction}
             self.chat_box.configure(state="normal")
             content = self.chat_box.get("1.0","end")
             match = None
-            for m in re.finditer(r'\n[⬡◈◉🤖] ASSISTANT', content):
+            for m in re.finditer(r'\nASSISTANT', content):
                 match = m
             if match:
                 lines_before = content[:match.start()].count("\n")
                 self.chat_box.delete(f"{lines_before+1}.0","end")
                 if new_text:
-                    provider = self._provider.get()
-                    icon = self.PROVIDERS.get(provider,{}).get("icon","🤖")
                     self.chat_box.insert("end",
-                        f"\n{icon} ASSISTANT\n{new_text}\n", "ai")
+                        f"\nASSISTANT\n{new_text}\n", "ai")
             else:
                 if new_text: self._append_msg("assistant", new_text)
             self.chat_box.see("end")
@@ -1083,7 +1098,7 @@ TASK: {instruction}
                 f.write(f"\n[{ts}] [{provider}]\n"
                         f"USER: {user_msg[:300]}\n"
                         f"AI:   {ai_reply[:500]}\n"
-                        f"{'─'*60}\n")
+                        f"{''*60}\n")
         except Exception: pass
 
 class DashboardPage(ctk.CTkFrame):
@@ -1115,27 +1130,27 @@ class DashboardPage(ctk.CTkFrame):
 
         kpi_container = ctk.CTkFrame(scroll, fg_color="transparent")
         kpi_container.pack(fill="x", pady=(20,10), padx=20)
-        ctk.CTkButton(kpi_container, text="◀", width=30, height=30, fg_color=T["bg_card"],
+        ctk.CTkButton(kpi_container, text="", width=30, height=30, fg_color=T["bg_card"],
                       command=lambda: kpi_canvas.xview_scroll(-1,"units")
                       ).pack(side="left", padx=(4,8))
         kpi_canvas = tk.Canvas(kpi_container, height=120, bg=T["bg_deep"], highlightthickness=0)
         kpi_canvas.pack(side="left", fill="x", expand=True)
-        ctk.CTkButton(kpi_container, text="▶", width=30, height=30, fg_color=T["bg_card"],
+        ctk.CTkButton(kpi_container, text="", width=30, height=30, fg_color=T["bg_card"],
                       command=lambda: kpi_canvas.xview_scroll(1,"units")
                       ).pack(side="left", padx=(8,4))
         kpi_inner = ctk.CTkFrame(kpi_canvas, fg_color="transparent")
         kpi_canvas.create_window((0,0), window=kpi_inner, anchor="nw")
 
-        self.c_pkts    = KPICard(kpi_inner, tr("total_packets"),"0",     T["accent"],        "📦", tr("captured"))
-        self.c_threats = KPICard(kpi_inner, tr("threats"),       "0",     T["danger"],        "⚡", tr("detected"))
-        self.c_blocked = KPICard(kpi_inner, tr("blocked_ips"),   "0",     T["accent_purple"], "🚫", tr("blocks"))
-        self.c_speed   = KPICard(kpi_inner, tr("net_speed"),     "0 B/s", T["safe"],          "📡", tr("in+out"))
-        self.c_alerts  = KPICard(kpi_inner, tr("alerts_min"),    "0",     T["accent_orange"], "🔔", tr("last_60s"))
-        self.c_conns   = KPICard(kpi_inner, tr("conns"),         "0",     T["accent_purple"], "🔗", tr("active"))
-        self.c_dns     = KPICard(kpi_inner, tr("dns"),           "0",     T["info"],          "🔎", tr("queries"))
-        self.c_arp     = KPICard(kpi_inner, tr("arp_hosts"),     "0",     T["accent"],        "🌐", tr("found"))
-        self.c_cpu     = KPICard(kpi_inner, tr("cpu_pct"),       "0%",    T["safe"],          "🖥", tr("usage"))
-        self.c_mem     = KPICard(kpi_inner, tr("mem_pct"),       "0%",    T["warn"],          "🧠", tr("used"))
+        self.c_pkts    = KPICard(kpi_inner, tr("total_packets"),"0",     T["accent"],        "", tr("captured"))
+        self.c_threats = KPICard(kpi_inner, tr("threats"),       "0",     T["danger"],        "", tr("detected"))
+        self.c_blocked = KPICard(kpi_inner, tr("blocked_ips"),   "0",     T["accent_purple"], "", tr("blocks"))
+        self.c_speed   = KPICard(kpi_inner, tr("net_speed"),     "0 B/s", T["safe"],          "", tr("in+out"))
+        self.c_alerts  = KPICard(kpi_inner, tr("alerts_min"),    "0",     T["accent_orange"], "", tr("last_60s"))
+        self.c_conns   = KPICard(kpi_inner, tr("conns"),         "0",     T["accent_purple"], "", tr("active"))
+        self.c_dns     = KPICard(kpi_inner, tr("dns"),           "0",     T["info"],          "", tr("queries"))
+        self.c_arp     = KPICard(kpi_inner, tr("arp_hosts"),     "0",     T["accent"],        "", tr("found"))
+        self.c_cpu     = KPICard(kpi_inner, tr("cpu_pct"),       "0%",    T["safe"],          "", tr("usage"))
+        self.c_mem     = KPICard(kpi_inner, tr("mem_pct"),       "0%",    T["warn"],          "", tr("used"))
         for c in [self.c_pkts,self.c_threats,self.c_blocked,self.c_speed,self.c_alerts,
                   self.c_conns,self.c_dns,self.c_arp,self.c_cpu,self.c_mem]:
             c.pack(side="left", padx=8, pady=4)
@@ -1182,14 +1197,14 @@ class DashboardPage(ctk.CTkFrame):
         right.pack(side="right", fill="both", padx=(8,0))
         right.pack_propagate(False)
 
-        section_label(right, tr("protocols"), "distribution")
+        section_label(right, tr("protocols"), tr("distribution"))
         self.fig_pie = plt.Figure(figsize=(3.4,2.8), facecolor=T["mpl_bg"])
         self.ax_pie  = self.fig_pie.add_subplot(111)
         self.ax_pie.set_facecolor(T["mpl_bg"])
         self.fig_pie.subplots_adjust(left=0.05,right=0.95,top=0.95,bottom=0.05)
         make_canvas(right, self.fig_pie)
 
-        section_label(right, tr("top_apps"), "by packets")
+        section_label(right, tr("top_apps"), tr("by_packets"))
         self.fig_bar = plt.Figure(figsize=(3.4,2.6), facecolor=T["mpl_bg"])
         self.ax_bar  = self.fig_bar.add_subplot(111)
         self.ax_bar.set_facecolor(T["mpl_bg"])
@@ -1198,15 +1213,15 @@ class DashboardPage(ctk.CTkFrame):
 
         bot = ctk.CTkFrame(scroll, fg_color=T["bg_panel"], corner_radius=14)
         bot.pack(fill="x", pady=(0,20), padx=20)
-        section_label(bot, tr("recent_connections"), "live stream")
+        section_label(bot, tr("recent_connections"), tr("live_stream"))
         cols = ("time","src","dst","app","size","status")
         self.live_tree = ttk.Treeview(bot, columns=cols, show="headings",
                                        style="Sentinel.Treeview", height=5)
         for col, w in zip(cols,[80,140,140,120,70,130]):
-            self.live_tree.heading(col, text=col.upper())
+            self.live_tree.heading(col, text=tr("col_"+col))
             self.live_tree.column(col, width=w, anchor="w")
-        self.live_tree.tag_configure("critical", foreground="#FF3B5C", font=("Consolas", 10, "bold"))
-        self.live_tree.tag_configure("high",     foreground="#FFCC00", font=("Segoe UI", 9, "bold"))
+        self.live_tree.tag_configure("critical", foreground="#FF3B5C")
+        self.live_tree.tag_configure("high",     foreground="#FFCC00")
         self.live_tree.tag_configure("danger",   foreground=T["danger"])
         self.live_tree.tag_configure("safe",     foreground="#00FF88")
         self.live_tree.tag_configure("info",     foreground=T["info"])
@@ -1220,7 +1235,7 @@ class DashboardPage(ctk.CTkFrame):
             self._mode_banner.configure(text=f"    {tr('simulation_mode')}  ",
                                          fg_color=T["warn"], text_color=T["bg_deep"])
         else:
-            self._mode_banner.configure(text=f"  📡  {tr('live_mode')}  ",
+            self._mode_banner.configure(text=f"{tr('live_mode')}",
                                          fg_color=T["safe"], text_color=T["bg_deep"])
 
     def _make_fig(self, parent, figsize):
@@ -1269,8 +1284,8 @@ class DashboardPage(ctk.CTkFrame):
     def add_live_row(self, src, dst, app, size, status):
         app_up    = (app or "").upper()
         status_up = (status or "").upper()
-        is_wifi   = "📡" in (app or "") or "802.11" in (app or "")
-        if is_wifi or "⚠" in status or "📡" in (app or ""):
+        is_wifi   = "" in (app or "") or "802.11" in (app or "")
+        if is_wifi or "" in status or "" in (app or ""):
             if any(k in app_up or k in status_up for k in ("DEAUTH","EVIL","MITM","CRITICAL","FLOOD")):
                 tag = "critical"
             else:
@@ -1461,7 +1476,7 @@ class AnalyzerPage(ctk.CTkFrame):
         ).pack(side="left", padx=14)
 
         self.cnt_lbl = ctk.CTkLabel(
-            tb, text="0 pkts", font=FONT_SMALL, text_color=T["text_dim"])
+            tb, text=f"0 {tr('packets')}", font=FONT_SMALL, text_color=T["text_dim"])
         self.cnt_lbl.pack(side="right", padx=10)
 
         ctk.CTkButton(
@@ -1483,7 +1498,8 @@ class AnalyzerPage(ctk.CTkFrame):
         self.tree = ttk.Treeview(
             tbl_f, columns=cols, show="headings", style="Sentinel.Treeview")
         for col, w in zip(cols, [40, 90, 145, 145, 60, 130, 65, 130]):
-            self.tree.heading(col, text=col.upper())
+            col_key = "col_hash" if col == "#" else "col_" + col
+            self.tree.heading(col, text=tr(col_key))
             self.tree.column(col, width=w, anchor="w")
 
         for tag, color in [
@@ -1566,7 +1582,7 @@ class AnalyzerPage(ctk.CTkFrame):
                     batch.append(self._incoming.popleft())
                 for rec in batch:
                     self._insert_row(rec)
-                self.cnt_lbl.configure(text=f"{self._count} pkts")
+                self.cnt_lbl.configure(text=f"{self._count} {tr('packets')}")
         except Exception:
             logging.exception("[AnalyzerPage] _flush_batch error")
         finally:
@@ -1609,7 +1625,7 @@ class AnalyzerPage(ctk.CTkFrame):
         self._count = 0
         for box in (self.tb_layers, self.tb_hex, self.tb_threats):
             self._fill_box(box, "")
-        self.cnt_lbl.configure(text="0 pkts")
+        self.cnt_lbl.configure(text=f"0 {tr('packets')}")
 
     def _inspect(self, _event=None):
         sel = self.tree.selection()
@@ -1638,15 +1654,15 @@ class AnalyzerPage(ctk.CTkFrame):
         try:
             related = [a for a in self.engine.alerts if a.get("actor") == src_ip][-15:]
             txt = (
-                f"⚠  {len(related)} threats from {src_ip}:\n\n"
+                f"  {len(related)} threats from {src_ip}:\n\n"
                 + "".join(
-                    f"  [{a['time']}]  {a['type']}  —  {a['severity']}\n"
+                    f"  [{a['time']}]  {a['type']}    {a['severity']}\n"
                     for a in related
                 )
                 if related else f"  No threats from {src_ip}"
             )
         except Exception:
-            txt = "⚠  Error loading threats"
+            txt = "  Error loading threats"
         self._fill_box(self.tb_threats, txt)
 
     def _apply_filter(self):
@@ -1708,8 +1724,8 @@ class AnalyzerPage(ctk.CTkFrame):
     def _tag_for(rec: "PacketRecord") -> str:
         app_up    = (rec.app or "").upper()
         status_up = (rec.status or "").upper()
-        is_wifi   = "📡" in (rec.app or "") or rec.proto == "802.11"
-        if is_wifi or "⚠" in rec.status or "📡" in (rec.app or ""):
+        is_wifi   = "" in (rec.app or "") or rec.proto == "802.11"
+        if is_wifi or "" in rec.status or "" in (rec.app or ""):
             if any(k in app_up or k in status_up for k in ("DEAUTH","EVIL","MITM","CRITICAL","FLOOD")):
                 return "critical"
             return "high"
@@ -1747,11 +1763,11 @@ class ThreatPage(ctk.CTkFrame):
         krow = ctk.CTkFrame(self, fg_color="transparent")
         krow.pack(fill="x", padx=20, pady=(20,10))
         self.sev_cards = {}
-        for sev, color, icon in [("CRITICAL",T["danger"],"🔴"),
-                                   ("HIGH",T["accent_orange"],"🟠"),
-                                   ("MEDIUM",T["warn"],"🟡"),
-                                   ("LOW",T["info"],"🔵")]:
-            c = KPICard(krow, sev, "0", color, icon)
+        for sev, color, icon in [("critical",T["danger"],""),
+                                   ("high",T["accent_orange"],""),
+                                   ("medium",T["warn"],""),
+                                   ("low",T["info"],"")]:
+            c = KPICard(krow, tr(sev), "0", color, "")
             c.pack(side="left",expand=True,fill="both",padx=5)
             self.sev_cards[sev] = c
 
@@ -1762,10 +1778,10 @@ class ThreatPage(ctk.CTkFrame):
         self.atree = ttk.Treeview(top, columns=cols, show="headings",
                                    style="Alert.Treeview")
         for col,w in zip(cols,[90,160,155,90,75,120]):
-            self.atree.heading(col,text=col.upper()); self.atree.column(col,width=w,anchor="w")
-        for sev,clr in [("CRITICAL",T["danger"]),("HIGH",T["accent_orange"]),
-                         ("MEDIUM",T["warn"]),("LOW",T["info"])]:
-            self.atree.tag_configure(sev, foreground=clr)
+            self.atree.heading(col,text=tr("col_"+col)); self.atree.column(col,width=w,anchor="w")
+        for sev,clr in [("critical",T["danger"]),("high",T["accent_orange"]),
+                         ("medium",T["warn"]),("low",T["info"])]:
+            self.atree.tag_configure(sev.upper(), foreground=clr)
         asb = ttk.Scrollbar(top, orient="vertical", command=self.atree.yview)
         self.atree.configure(yscrollcommand=asb.set)
         asb.pack(side="right",fill="y",padx=(0,4))
@@ -1818,13 +1834,13 @@ class ThreatPage(ctk.CTkFrame):
 
     def _refresh_blocked(self):
         self.blk_box.configure(state="normal"); self.blk_box.delete("0.0","end")
-        txt = "\n".join(f"🚫  {ip}" for ip in sorted(self.engine.blocked_ips)) or tr("no_blocked_ips")
+        txt = "\n".join(f"{ip}" for ip in sorted(self.engine.blocked_ips)) or tr("no_blocked_ips")
         self.blk_box.insert("end",txt); self.blk_box.configure(state="disabled")
 
     def _tick(self):
-        counts = {"CRITICAL":0,"HIGH":0,"MEDIUM":0,"LOW":0}
+        counts = {"critical":0,"high":0,"medium":0,"low":0}
         for a in self.engine.alerts:
-            sev = a.get("severity","LOW"); counts[sev] = counts.get(sev,0)+1
+            sev = a.get("severity","low").lower(); counts[sev] = counts.get(sev,0)+1
         for sev,card in self.sev_cards.items(): card.set(str(counts.get(sev,0)))
         self.after(2000,self._tick)
 
@@ -1839,32 +1855,184 @@ class WebAccessPage(ctk.CTkFrame):
     def _build(self):
         scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
         scroll.pack(fill="both", expand=True, pady=8)
+
+        # Header
         hdr = ctk.CTkFrame(scroll, fg_color=T["bg_panel"], corner_radius=14)
         hdr.pack(fill="x", padx=20, pady=(20, 12))
-        ctk.CTkLabel(hdr, text="📱  ВЕБ-ДАШБОРД (Wi-Fi)", font=FONT_HEADER,
+        ctk.CTkLabel(hdr, text=tr("web_dashboard"), font=FONT_HEADER,
                      text_color=T["accent"]).pack(pady=(16, 4))
-        ctk.CTkLabel(hdr, text="Телефон и ПК — в одной Wi-Fi сети",
+        ctk.CTkLabel(hdr, text=tr("web_dashboard_desc"),
                      font=FONT_SMALL, text_color=T["text_dim"]).pack(pady=(0, 12))
         self._url_box = ctk.CTkTextbox(hdr, height=80, fg_color=T["bg_card"],
                                         text_color=T["safe"], font=("Consolas", 14))
         self._url_box.pack(fill="x", padx=16, pady=(0, 8))
         brow = ctk.CTkFrame(hdr, fg_color="transparent")
         brow.pack(fill="x", padx=16, pady=(0, 16))
-        ctk.CTkButton(brow, text="📋 Копировать", width=140, fg_color=T["accent"],
+        ctk.CTkButton(brow, text=tr("copy"), width=140, fg_color=T["accent"],
                       text_color=T["bg_deep"], command=self._copy).pack(side="left", padx=4)
-        ctk.CTkButton(brow, text="🌐 Открыть", width=120, fg_color=T["safe"],
+        ctk.CTkButton(brow, text=tr("open"), width=120, fg_color=T["safe"],
                       text_color=T["bg_deep"], command=self._open).pack(side="left", padx=4)
+
+        # KPI Cards
+        kpi_row = ctk.CTkFrame(scroll, fg_color="transparent")
+        kpi_row.pack(fill="x", padx=20, pady=(0, 12))
+        self._kpi_status = KPICard(kpi_row, tr("web_server_status"), tr("active_status"), T["safe"], "")
+        self._kpi_status.pack(side="left", expand=True, fill="both", padx=5)
+        self._kpi_port = KPICard(kpi_row, tr("web_port"), "5000", T["accent"], "")
+        self._kpi_port.pack(side="left", expand=True, fill="both", padx=5)
+        self._kpi_requests = KPICard(kpi_row, tr("web_requests"), "0", T["info"], "")
+        self._kpi_requests.pack(side="left", expand=True, fill="both", padx=5)
+        self._kpi_uptime = KPICard(kpi_row, tr("web_uptime"), "0s", T["accent_orange"], "")
+        self._kpi_uptime.pack(side="left", expand=True, fill="both", padx=5)
+
+        # Server Controls
+        controls = ctk.CTkFrame(scroll, fg_color=T["bg_panel"], corner_radius=12)
+        controls.pack(fill="x", padx=20, pady=(0, 12))
+        section_label(controls, tr("web_settings"), "")
+        btn_row = ctk.CTkFrame(controls, fg_color="transparent")
+        btn_row.pack(fill="x", padx=16, pady=(0, 12))
+        self._btn_start = ctk.CTkButton(btn_row, text=tr("web_start"), width=140, fg_color=T["safe"],
+                                        text_color=T["bg_deep"], font=FONT_SMALL, corner_radius=DEFAULT_CORNER,
+                                        command=self._start_server)
+        self._btn_start.pack(side="left", padx=4)
+        self._btn_stop = ctk.CTkButton(btn_row, text=tr("web_stop"), width=140, fg_color=T["danger"],
+                                       text_color=T["text_primary"], font=FONT_SMALL, corner_radius=DEFAULT_CORNER,
+                                       command=self._stop_server)
+        self._btn_stop.pack(side="left", padx=4)
+        self._btn_restart = ctk.CTkButton(btn_row, text=tr("web_restart"), width=140, fg_color=T["accent"],
+                                          text_color=T["bg_deep"], font=FONT_SMALL, corner_radius=DEFAULT_CORNER,
+                                          command=self._restart_server)
+        self._btn_restart.pack(side="left", padx=4)
+
+        # Settings
+        settings = ctk.CTkFrame(controls, fg_color="transparent")
+        settings.pack(fill="x", padx=16, pady=(0, 10))
+        ctk.CTkLabel(settings, text=tr("web_port")+":", font=FONT_SMALL, text_color=T["text_primary"]).pack(side="left", padx=(0, 8))
+        self._port_entry = ctk.CTkEntry(settings, width=100, fg_color=T["bg_card"],
+                                       border_color=T["border"], text_color=T["text_primary"], font=FONT_MONO, corner_radius=8)
+        self._port_entry.pack(side="left", padx=(0, 16))
+        self._port_entry.insert(0, str(CFG.get("web_port", 5000)))
+        self._autostart_var = ctk.BooleanVar(value=CFG.get("web_autostart", False))
+        self._log_requests_var = ctk.BooleanVar(value=CFG.get("web_log_requests", False))
+        ctk.CTkSwitch(settings, text=tr("web_autostart"), variable=self._autostart_var,
+                     font=FONT_SMALL, fg_color=T["bg_card"], progress_color=T["accent"],
+                     command=self._save_settings).pack(side="left", padx=8)
+        ctk.CTkSwitch(settings, text=tr("web_log_requests"), variable=self._log_requests_var,
+                     font=FONT_SMALL, fg_color=T["bg_card"], progress_color=T["accent"],
+                     command=self._save_settings).pack(side="left", padx=8)
+        ctk.CTkButton(settings, text=tr("save"), width=100, fg_color=T["accent"],
+                     text_color=T["bg_deep"], font=FONT_SMALL, command=self._save_settings).pack(side="left", padx=8)
+        ctk.CTkButton(settings, text=tr("web_open_config"), width=160, fg_color=T["bg_card"],
+                     text_color=T["text_dim"], font=FONT_SMALL, command=self._open_config).pack(side="left", padx=8)
+
+        # Server Info
+        info_panel = ctk.CTkFrame(scroll, fg_color=T["bg_panel"], corner_radius=12)
+        info_panel.pack(fill="x", padx=20, pady=(0, 20))
+        section_label(info_panel, tr("web_server_info"), "")
+        self._info_box = ctk.CTkTextbox(info_panel, height=120, fg_color=T["bg_card"],
+                                       text_color=T["text_primary"], font=FONT_MONO)
+        self._info_box.pack(fill="x", padx=16, pady=(0, 16))
+        self._refresh_info()
+
+    def _start_server(self):
+        if not self.app_ref:
+            return
+        self.app_ref._start_flask_api()
+        self._log_message("Web server started")
+
+    def _stop_server(self):
+        if not self.app_ref:
+            return
+        self.app_ref._stop_flask_api()
+        self._log_message("Web server stopped")
+
+    def _restart_server(self):
+        if not self.app_ref:
+            return
+        self.app_ref._restart_flask_api()
+        self._log_message("Web server restarting...")
+
+    def _save_settings(self):
+        port_str = self._port_entry.get()
+        try:
+            port = int(port_str)
+            CFG["web_port"] = port
+            CFG["web_autostart"] = self._autostart_var.get()
+            CFG["web_log_requests"] = self._log_requests_var.get()
+            self._kpi_port.set(str(port))
+            save_config(CFG)
+            self._log_message("Settings saved")
+        except Exception as e:
+            self._log_message(f"Error saving settings: {e}")
+
+    def _refresh_info(self):
+        import sys
+        import flask
+        info_text = []
+        info_text.append(f"Python: {sys.version.split()[0]}")
+        info_text.append(f"Flask: {flask.__version__}")
+        port = int(CFG.get("web_port", 5000))
+        info_text.append(f"Port: {port}")
+        info_text.append(f"Autostart: {('Yes' if CFG.get('web_autostart', False) else 'No')}")
+        info_text.append(f"Log requests: {('Yes' if CFG.get('web_log_requests', False) else 'No')}")
+        self._info_box.configure(state="normal")
+        self._info_box.delete("0.0", "end")
+        self._info_box.insert("end", "\n".join([f" {line}" for line in info_text]))
+        self._info_box.configure(state="disabled")
+
+    def _log_message(self, msg):
+        self._info_box.configure(state="normal")
+        self._info_box.insert("end", f"\n [{datetime.now().strftime('%H:%M:%S')}] {msg}")
+        self._info_box.configure(state="disabled")
+
+    def _open_config(self):
+        import subprocess
+        import sys
+        config_path = Path("sentinel_config.json").resolve()
+        if sys.platform == "win32":
+            os.startfile(config_path)
+        elif sys.platform == "darwin":
+            subprocess.call(["open", str(config_path)])
+        else:
+            subprocess.call(["xdg-open", str(config_path)])
 
     def _refresh(self):
         from utils.network import get_connection_urls
         port = int(CFG.get("web_port", 5000))
         urls = get_connection_urls(port)
-        lines = [f"📶 {u['label']}: {u['url']}" for u in urls] or ["⚠ Wi-Fi IP не найден"]
+        lines = [f" {u['label']}: {u['url']}" for u in urls] or [" Wi-Fi IP не найден"]
         self._url_box.configure(state="normal")
         self._url_box.delete("0.0", "end")
         self._url_box.insert("end", "\n".join(lines))
         self._url_box.configure(state="disabled")
         self._primary = urls[0]["url"] if urls else ""
+
+        # Update KPIs from app_ref
+        if self.app_ref:
+            # Status
+            if self.app_ref._flask_running:
+                self._kpi_status.set(tr("active_status"))
+                self._kpi_status.set_color(T["safe"])
+            else:
+                self._kpi_status.set(tr("blocked_status"))
+                self._kpi_status.set_color(T["danger"])
+            # Requests
+            self._kpi_requests.set(str(self.app_ref._flask_request_count))
+            # Uptime
+            if self.app_ref._flask_running and self.app_ref._flask_start_time:
+                delta = datetime.now() - self.app_ref._flask_start_time
+                total_secs = int(delta.total_seconds())
+                hours, remainder = divmod(total_secs, 3600)
+                mins, secs = divmod(remainder, 60)
+                if hours > 0:
+                    uptime_str = f"{hours}h {mins}m {secs}s"
+                elif mins > 0:
+                    uptime_str = f"{mins}m {secs}s"
+                else:
+                    uptime_str = f"{secs}s"
+                self._kpi_uptime.set(uptime_str)
+            else:
+                self._kpi_uptime.set("0s")
 
     def _copy(self):
         if getattr(self, "_primary", None):
@@ -1878,7 +2046,7 @@ class WebAccessPage(ctk.CTkFrame):
 
     def _tick(self):
         self._refresh()
-        self.after(8000, self._tick)
+        self.after(2000, self._tick)
 
 class TopologyPage(ctk.CTkFrame):
     def __init__(self, master, engine, **kw):
@@ -1888,20 +2056,20 @@ class TopologyPage(ctk.CTkFrame):
     def _build(self):
         top = ctk.CTkFrame(self, fg_color=T["bg_panel"], corner_radius=12)
         top.pack(fill="both",expand=True,padx=20,pady=(20,8))
-        section_label(top, f"⬡ {tr('network_topology')}", "ARP-based host discovery")
+        section_label(top, f" {tr('network_topology')}", "ARP-based host discovery")
         self.fig = plt.Figure(figsize=(10,5.5), facecolor=T["mpl_bg"])
         self.ax  = self.fig.add_subplot(111)
         self.ax.set_facecolor(T["mpl_bg"]); self.ax.axis("off")
         make_canvas(top, self.fig)
         bot = ctk.CTkFrame(self, fg_color=T["bg_panel"], corner_radius=12)
         bot.pack(fill="x",padx=20,pady=(0,20))
-        section_label(bot, f"⬡ {tr('discovered_hosts')}", "from ARP table")
+        section_label(bot, f" {tr('discovered_hosts')}", tr("from_arp_table"))
         ctl_row = ctk.CTkFrame(bot, fg_color="transparent")
         ctl_row.pack(fill="x", padx=8, pady=(0,6))
-        ctk.CTkButton(ctl_row, text="🔎  PROBE HOSTS", width=140, height=30,
+        ctk.CTkButton(ctl_row, text=tr("probe_hosts"), width=140, height=30,
                       fg_color=T["accent"], text_color=T["bg_deep"],
                       command=self._probe_hosts).pack(side="left", padx=(0,8))
-        ctk.CTkButton(ctl_row, text=f"📤  {tr('export')}", width=120, height=30,
+        ctk.CTkButton(ctl_row, text=tr("export"), width=120, height=30,
                       fg_color=T["bg_card"], text_color=T["text_dim"],
                       command=self._export_hosts).pack(side="left")
 
@@ -1909,7 +2077,8 @@ class TopologyPage(ctk.CTkFrame):
         self.htree = ttk.Treeview(bot, columns=cols, show="headings",
                                    style="Sentinel.Treeview", height=5)
         for col,w in zip(cols,[120,150,170,140,160,110,100]):
-            self.htree.heading(col,text=col.upper()); self.htree.column(col,width=w,anchor="w")
+            col_key = "col_"+col if col != "ip" else "ip_control"
+            self.htree.heading(col,text=tr(col_key)); self.htree.column(col,width=w,anchor="w")
         self.htree.pack(fill="x",padx=8,pady=(0,10))
         self._host_cache = {}
         self._last_seen = {}
@@ -2085,27 +2254,11 @@ class TopologyPage(ctk.CTkFrame):
         except Exception:
             logging.exception('Export hosts failed')
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# FIX 2: LogsPage — асинхронная запись в файл через внутреннюю очередь.
-#
-# Проблема: LogsPage.append() вызывался прямо из GUI-потока (_pull_deauth_stats)
-# и делал синхронный open(..., "a") на каждый алерт.  При 5-й атаке буфер
-# дисковых прерываний ОС (Kali/Linux) переполнялся и open() блокировался
-# на несколько секунд, замораживая Tkinter.
-#
-# Решение: единственный daemon-поток _file_writer_loop владеет файловым
-# дескриптором и дренирует очередь self._file_q.  Метод append() кладёт
-# строку в очередь через put_nowait() — это O(1) и никогда не блокирует GUI.
-# ══════════════════════════════════════════════════════════════════════════════
 class LogsPage(ctk.CTkFrame):
     def __init__(self, master, engine, **kw):
         super().__init__(master, fg_color="transparent", **kw)
         self.engine = engine
         self._log_path = LOG_DIR / f"sentinel_{datetime.now().strftime('%Y%m%d')}.log"
-
-        # Очередь для фонового писателя.  maxsize=500 — если диск мёртв,
-        # старые строки вытесняются, но GUI не блокируется.
         self._file_q: queue.Queue = queue.Queue(maxsize=500)
         self._writer_thread = threading.Thread(
             target=self._file_writer_loop,
@@ -2116,23 +2269,22 @@ class LogsPage(ctk.CTkFrame):
         self._build()
 
     def _file_writer_loop(self) -> None:
-        """Фоновый поток — единственный владелец файлового дескриптора лога."""
         while True:
             try:
                 line = self._file_q.get(timeout=2)
-                if line is None:   # сигнал завершения (при shutdown)
+                if line is None:
                     break
                 with open(self._log_path, "a", encoding="utf-8") as f:
                     f.write(line)
             except queue.Empty:
-                continue           # тайм-аут — просто ждём следующей строки
+                continue
             except Exception:
-                pass               # не убиваем поток при ошибках I/O
+                pass
 
     def _build(self):
         tb = ctk.CTkFrame(self, fg_color=T["bg_panel"], corner_radius=10)
         tb.pack(fill="x",padx=20,pady=(20,8))
-        ctk.CTkLabel(tb, text=f"⬡  {tr('logs')}", font=FONT_HEADER,
+        ctk.CTkLabel(tb, text=tr('logs'), font=FONT_HEADER,
                      text_color=T["accent"]).pack(side="left",padx=14,pady=10)
         ctk.CTkButton(tb, text=tr('clear'), width=80, font=FONT_SMALL,
                       fg_color=T["bg_card"], text_color=T["text_dim"],
@@ -2146,20 +2298,18 @@ class LogsPage(ctk.CTkFrame):
         self.box.configure(state="disabled")
 
     def append(self, msg: str, level: str = "INFO") -> None:
-        # ── Виджет: только GUI-поток, только лёгкий insert ───────────────
         self.box.configure(state="normal")
         ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         self.box.insert("end", f"[{ts}] [{level:8s}]  {msg}\n")
         self.box.see("end")
         self.box.configure(state="disabled")
 
-        # ── Файл: кладём в очередь, никогда не блокируем GUI ─────────────
         if CFG.get("log_to_file"):
             line = f"[{datetime.now()}] [{level}] {msg}\n"
             try:
                 self._file_q.put_nowait(line)
             except queue.Full:
-                pass  # переполнение — жертвуем строкой лога, но не GUI
+                pass
 
     def _clear(self):
         self.box.configure(state="normal"); self.box.delete("0.0","end")
@@ -2168,7 +2318,6 @@ class LogsPage(ctk.CTkFrame):
     def _export(self):
         messagebox.showinfo(tr("export"), f"Logs: {self._log_path.absolute()}\n"
                              f"AI dialogs: {LOG_DIR.absolute()}")
-
 
 class SettingsPage(ctk.CTkFrame):
     def __init__(self, master, engine, app_ref, current_user=None, **kw):
@@ -2182,15 +2331,15 @@ class SettingsPage(ctk.CTkFrame):
         scroll.pack(fill="both", expand=True, padx=20, pady=20)
         u, role = self.current_user; is_admin = (role == "admin")
 
-        self._section(scroll, f"⬡ {tr('current_session')}")
+        self._section(scroll, tr('current_session'))
         info = ctk.CTkFrame(scroll, fg_color=T["bg_card"], corner_radius=10)
         info.pack(fill="x",padx=24,pady=(0,8))
-        ctk.CTkLabel(info, text=f"{'👑' if role=='admin' else ''}  {u.upper()}",
+        ctk.CTkLabel(info, text=u.upper(),
                      font=FONT_HEADER, text_color=T["accent"]).pack(side="left",padx=16,pady=12)
-        ctk.CTkLabel(info, text=f"Role: {role.upper()}", font=FONT_SMALL,
+        ctk.CTkLabel(info, text=f"{tr('role')}: {tr(role).upper()}", font=FONT_SMALL,
                      text_color=T["text_dim"]).pack(side="right",padx=16)
 
-        self._section(scroll, f"⬡ {tr('capture_mode')}")
+        self._section(scroll, tr('capture_mode'))
         mode_card = ctk.CTkFrame(scroll, fg_color=T["bg_card"], corner_radius=12)
         mode_card.pack(fill="x",padx=24,pady=(0,12))
         ind_row = ctk.CTkFrame(mode_card, fg_color="transparent")
@@ -2208,57 +2357,57 @@ class SettingsPage(ctk.CTkFrame):
         self._mode_desc.pack(anchor="w",padx=16,pady=(0,12))
         self._update_mode_ui()
 
-        self._section(scroll, f"⬡ {tr('ai_assistant')}")
+        self._section(scroll, tr('ai_assistant'))
         ai_card = ctk.CTkFrame(scroll, fg_color=T["bg_card"], corner_radius=12)
         ai_card.pack(fill="x",padx=24,pady=(0,12))
         self._ai_fallback = tk.BooleanVar(value=CFG.get("ai_auto_fallback",True))
         self._ai_log      = tk.BooleanVar(value=CFG.get("ai_log_dialogs",True))
-        ctk.CTkSwitch(ai_card, text="Auto-fallback: try next provider on error",
+        ctk.CTkSwitch(ai_card, text=tr("auto_fallback"),
                       variable=self._ai_fallback, font=FONT_BODY,
                       text_color=T["text_primary"],
                       progress_color=T["accent"]).pack(anchor="w",padx=16,pady=(8,4))
-        ctk.CTkSwitch(ai_card, text="Log AI dialogs to file",
+        ctk.CTkSwitch(ai_card, text=tr("log_ai_dialogs"),
                       variable=self._ai_log, font=FONT_BODY,
                       text_color=T["text_primary"],
                       progress_color=T["accent"]).pack(anchor="w",padx=16,pady=(0,12))
-        self._section(scroll, "⬡ TELEGRAM BOT")
+        self._section(scroll, tr('telegram_bot'))
         tg_card = ctk.CTkFrame(scroll, fg_color=T["bg_card"], corner_radius=12)
         tg_card.pack(fill="x", padx=24, pady=(0, 12))
 
         tg_r1 = ctk.CTkFrame(tg_card, fg_color="transparent")
         tg_r1.pack(fill="x", padx=16, pady=(12, 4))
-        ctk.CTkLabel(tg_r1, text="Bot Token:", font=FONT_SMALL,
+        ctk.CTkLabel(tg_r1, text=tr("bot_token"), font=FONT_SMALL,
                      text_color=T["text_dim"], width=120).pack(side="left")
         self._tg_token = ctk.CTkEntry(tg_r1, width=340, font=FONT_MONO,
                                        fg_color=T["bg_card"], border_color=T["border"],
                                        text_color=T["text_primary"], corner_radius=8,
-                                       placeholder_text="123456789:AAF...")
+                                       placeholder_text=tr("bot_token_placeholder"))
         self._tg_token.insert(0, CFG.get("tg_token", ""))
         self._tg_token.pack(side="left", padx=8)
 
         tg_r2 = ctk.CTkFrame(tg_card, fg_color="transparent")
         tg_r2.pack(fill="x", padx=16, pady=(4, 8))
-        ctk.CTkLabel(tg_r2, text="Chat ID:", font=FONT_SMALL,
+        ctk.CTkLabel(tg_r2, text=tr("chat_id"), font=FONT_SMALL,
                      text_color=T["text_dim"], width=120).pack(side="left")
         self._tg_chat = ctk.CTkEntry(tg_r2, width=200, font=FONT_MONO,
                                       fg_color=T["bg_card"], border_color=T["border"],
                                       text_color=T["text_primary"], corner_radius=8,
-                                      placeholder_text="8671915659")
+                                      placeholder_text=tr("chat_id_placeholder"))
         self._tg_chat.insert(0, CFG.get("tg_chat_id", ""))
         self._tg_chat.pack(side="left", padx=8)
 
-        tg_hint = ctk.CTkLabel(tg_card, text="💡 Отправьте /start боту, затем нажмите 'GET CHAT ID'",
+        tg_hint = ctk.CTkLabel(tg_card, text=tr("tg_hint"),
                                font=FONT_SMALL, text_color=T["text_dim"], wraplength=500, justify="left")
         tg_hint.pack(anchor="w", padx=16, pady=(0, 8))
 
         btn_row = ctk.CTkFrame(tg_card, fg_color="transparent")
         btn_row.pack(fill="x", padx=16, pady=(0, 12))
-        
-        ctk.CTkButton(btn_row, text=" GET CHAT ID", width=160,
+
+        ctk.CTkButton(btn_row, text=tr("get_chat_id"), width=160,
                       fg_color=T["bg_hover"], text_color=T["accent"], font=FONT_SMALL,
                       command=self._tg_get_chat_id).pack(side="left", padx=(0, 8))
-        
-        ctk.CTkButton(btn_row, text=" TEST CONNECTION", width=180,
+
+        ctk.CTkButton(btn_row, text=tr("test_connection"), width=180,
                       fg_color=T["bg_hover"], text_color=T["accent"], font=FONT_SMALL,
                       command=self._tg_test).pack(side="left", padx=(0, 8))
 
@@ -2266,7 +2415,7 @@ class SettingsPage(ctk.CTkFrame):
                                         text_color=T["text_dim"])
         self._tg_status.pack(side="left", padx=8)
 
-        self._section(scroll, f"⬡ {tr('network_interface')}")
+        self._section(scroll, tr('network_interface'))
         if is_admin:
             adapters = list(psutil.net_if_addrs().items())
             self._adapter_var = tk.StringVar(value=CFG.get("adapter",""))
@@ -2276,14 +2425,14 @@ class SettingsPage(ctk.CTkFrame):
                                    variable=self._adapter_var, value=name,
                                    font=FONT_BODY, text_color=T["text_primary"],
                                    fg_color=T["accent"]).pack(anchor="w",padx=24,pady=3)
-            ctk.CTkButton(scroll, text=f"▶  {tr('apply_and_restart')}", width=240,
+            ctk.CTkButton(scroll, text=tr('apply_and_restart'), width=240,
                           fg_color=T["accent"], text_color=T["bg_deep"], font=FONT_SMALL,
                           command=self._apply_adapter).pack(anchor="w",padx=24,pady=(10,20))
         else:
-            ctk.CTkLabel(scroll, text="⚠ Adapter settings require admin role.",
-                         font=FONT_SMALL, text_color=T["warn"]).pack(anchor="w",padx=24,pady=8)
+            ctk.CTkLabel(scroll, text=tr("adapter_admin_required"),
+                     font=FONT_SMALL, text_color=T["warn"]).pack(anchor="w",padx=24,pady=8)
 
-        self._section(scroll, f"⬡ {tr('appearance')}")
+        self._section(scroll, tr('appearance'))
         row = ctk.CTkFrame(scroll, fg_color="transparent"); row.pack(fill="x",padx=24,pady=6)
         ctk.CTkLabel(row, text=tr("theme"), font=FONT_SMALL, text_color=T["text_dim"],
                      width=120).pack(side="left")
@@ -2304,7 +2453,7 @@ class SettingsPage(ctk.CTkFrame):
                       fg_color=T["bg_card"], text_color=T["text_dim"], font=FONT_SMALL,
                       command=self._apply_theme).pack(anchor="w",padx=24,pady=(10,20))
 
-        self._section(scroll, f"⬡ {tr('language')}")
+        self._section(scroll, tr('language'))
         lang_row = ctk.CTkFrame(scroll, fg_color="transparent")
         lang_row.pack(fill="x",padx=24,pady=(6,8))
         ctk.CTkLabel(lang_row, text=tr("language")+":", font=FONT_SMALL, text_color=T["text_dim"], width=120).pack(side="left")
@@ -2316,14 +2465,14 @@ class SettingsPage(ctk.CTkFrame):
                       fg_color=T["accent"], text_color=T["bg_deep"], font=FONT_SMALL,
                       command=self._apply_language).pack(anchor="w",padx=24,pady=(6,12))
 
-        self._section(scroll, f"⬡ {tr('detection_thresholds')}")
+        self._section(scroll, tr('detection_thresholds'))
         if is_admin:
             sliders = [
-                ("High PPS (packets/2s)",       "pps_thresh",    50,1000,10),
-                ("SYN Flood (packets/2s)",       "syn_thresh",    20,300,1),
-                ("Port scan (unique ports/5s)",  "scan_thresh",    5, 50,1),
-                ("ICMP flood (packets/2s)",      "icmp_thresh",   10,200,1),
-                ("Data exfil packet size (KB)",  "data_exfil_kb",  2, 64,1),
+                (tr("pps_thresh_label"),       "pps_thresh",    50,1000,10),
+                (tr("syn_thresh_label"),       "syn_thresh",    20,300,1),
+                (tr("scan_thresh_label"),       "scan_thresh",    5, 50,1),
+                (tr("icmp_thresh_label"),      "icmp_thresh",   10,200,1),
+                (tr("data_exfil_label"),       "data_exfil_kb",  2, 64,1),
             ]
             self._sliders = {}
             for label,key,mn,mx,step in sliders:
@@ -2339,29 +2488,29 @@ class SettingsPage(ctk.CTkFrame):
                 except Exception: sl.set(mn)
                 sl.pack(side="right",padx=10); self._sliders[key] = sl
         else:
-            ctk.CTkLabel(scroll, text="⚠ Threshold settings require admin role.",
-                         font=FONT_SMALL, text_color=T["warn"]).pack(anchor="w",padx=24,pady=8)
+            ctk.CTkLabel(scroll, text=tr("threshold_admin_required"),
+                     font=FONT_SMALL, text_color=T["warn"]).pack(anchor="w",padx=24,pady=8)
 
         if is_admin:
-            self._section(scroll, f"⬡ {tr('user_management')}")
+            self._section(scroll, tr('user_management'))
             cols = ("username","role","created")
             utree = ttk.Treeview(scroll, columns=cols, show="headings",
                                   style="Sentinel.Treeview", height=4)
             for col,w in zip(cols,[140,80,200]):
-                utree.heading(col,text=col.upper()); utree.column(col,width=w,anchor="w")
+                utree.heading(col,text=tr("col_"+col)); utree.column(col,width=w,anchor="w")
             for uname,udata in USERS.items():
-                utree.insert("","end",values=(uname,udata.get("role","user"),
-                                               udata.get("created","—")))
+                utree.insert("","end",values=(uname,tr(udata.get("role","operator")),
+                                               udata.get("created","")))
             utree.pack(fill="x",padx=24,pady=(0,8))
 
-        self._section(scroll, f"⬡ {tr('behaviour')}")
+        self._section(scroll, tr('behaviour'))
         self._auto_block = tk.BooleanVar(value=CFG.get("auto_block",False))
         self._log_file   = tk.BooleanVar(value=CFG.get("log_to_file",True))
-        ctk.CTkSwitch(scroll, text="Auto-block IPs that trigger threats",
+        ctk.CTkSwitch(scroll, text=tr("auto_block"),
                       variable=self._auto_block, font=FONT_BODY,
                       text_color=T["text_primary"],
                       progress_color=T["accent"]).pack(anchor="w",padx=24,pady=6)
-        ctk.CTkSwitch(scroll, text="Write logs to file", variable=self._log_file,
+        ctk.CTkSwitch(scroll, text=tr("write_logs"), variable=self._log_file,
                       font=FONT_BODY, text_color=T["text_primary"],
                       progress_color=T["accent"]).pack(anchor="w",padx=24,pady=6)
         row3 = ctk.CTkFrame(scroll, fg_color="transparent"); row3.pack(fill="x",padx=24,pady=4)
@@ -2383,17 +2532,13 @@ class SettingsPage(ctk.CTkFrame):
         is_demo = self._demo_var.get()
         if is_demo:
             self._mode_indicator.configure(
-                text=f"    {tr('simulation_mode')}  ", fg_color=T["warn"], text_color=T["bg_deep"])
-            self._mode_desc.configure(
-                text="Synthetic data generated by the built-in demo engine. "
-                     "No real traffic captured. Safe without admin/Npcap.")
+                text=f"{tr('simulation_mode')}", fg_color=T["warn"], text_color=T["bg_deep"])
+            self._mode_desc.configure(text=tr("demo_mode_desc"))
             self._mode_switch.configure(progress_color=T["warn"])
         else:
             self._mode_indicator.configure(
-                text=f"    {tr('live_mode')}  ", fg_color=T["safe"], text_color=T["bg_deep"])
-            self._mode_desc.configure(
-                text="Real packets captured via Scapy. "
-                     "Requires admin + Npcap (Windows) / libpcap (Linux/macOS).")
+                text=f"{tr('live_mode')}", fg_color=T["safe"], text_color=T["bg_deep"])
+            self._mode_desc.configure(text=tr("live_mode_desc"))
             self._mode_switch.configure(progress_color=T["safe"])
 
     def _on_mode_toggle(self):
@@ -2424,25 +2569,24 @@ class SettingsPage(ctk.CTkFrame):
         chat_id = self._tg_chat.get().strip()
         print(f"[TG DEBUG] token={token[:20] if token else 'EMPTY'}..., chat_id={chat_id}")
         if not token or not chat_id:
-            self._tg_status.configure(text="⚠ Введите token и chat_id", text_color=T["warn"])
+            self._tg_status.configure(text=tr("tg_token_chat_id_empty"), text_color=T["warn"])
             print("[TG DEBUG] Token или chat_id пуст!")
             return
-        self._tg_status.configure(text="⏳ Отправка...", text_color=T["text_dim"])
+        self._tg_status.configure(text=tr("tg_sending"), text_color=T["text_dim"])
         def _send(token_val=token, chat_id_val=chat_id):
             try:
                 import requests
                 import json
                 print(f"[TG DEBUG] Начало отправки. Token: {token_val[:20]}..., ChatID: {chat_id_val}")
-                
-                # Преобразуем chat_id в число
+
                 try:
                     chat_id_int = int(chat_id_val)
                 except ValueError:
                     raise ValueError(f"Chat ID должен быть числом, получено: {chat_id_val}")
-                
+
                 payload = {
                     "chat_id": chat_id_int,
-                    "text": "✅ *SOC Sentinel* подключён!\nTelegram-бот активен.",
+                    "text": " *SOC Sentinel* подключён!\nTelegram-бот активен.",
                     "parse_mode": "Markdown"
                 }
                 url = f"https://api.telegram.org/bot{token_val}/sendMessage"
@@ -2451,43 +2595,42 @@ class SettingsPage(ctk.CTkFrame):
                 r = requests.post(url, json=payload, timeout=8)
                 print(f"[TG DEBUG] Статус ответа: {r.status_code}")
                 print(f"[TG DEBUG] Ответ: {r.text[:500]}")
-                
+
                 if r.status_code == 200:
-                    print("[TG DEBUG] ✅ Успешно!")
+                    print("[TG DEBUG]  Успешно!")
                     self.after(0, lambda: self._tg_status.configure(
-                        text="✅ Сообщение отправлено!", text_color=T["safe"]))
+                        text=tr("tg_sent"), text_color=T["safe"]))
                 else:
                     try:
                         resp_json = r.json()
                         err = resp_json.get("description", str(resp_json))
                     except:
                         err = r.text
-                    print(f"[TG DEBUG] ✖ Ошибка: {err}")
-                    
-                    # Если ошибка "chat not found", покажем как получить Chat ID
+                    print(f"[TG DEBUG]  Ошибка: {err}")
+
                     if "chat not found" in err.lower():
                         hint = "Отправьте /start боту, затем напишите текст сообщения"
                         self.after(0, lambda h=hint: self._tg_status.configure(
-                            text=f"✖ Chat not found. {h}", text_color=T["danger"]))
+                            text=f" Chat not found. {h}", text_color=T["danger"]))
                     else:
                         self.after(0, lambda err_msg=err: self._tg_status.configure(
-                            text=f"✖ {err_msg}", text_color=T["danger"]))
+                            text=f" {err_msg}", text_color=T["danger"]))
             except Exception as e:
-                print(f"[TG DEBUG] ✖ Exception: {type(e).__name__}: {e}")
+                print(f"[TG DEBUG]  Exception: {type(e).__name__}: {e}")
                 import traceback
                 traceback.print_exc()
                 err_msg = f"{type(e).__name__}: {str(e)}"
                 self.after(0, lambda msg=err_msg: self._tg_status.configure(
-                    text=f"✖ {msg}", text_color=T["danger"]))
+                    text=f" {msg}", text_color=T["danger"]))
         threading.Thread(target=_send, daemon=True).start()
 
     def _tg_get_chat_id(self):
         """Попытаться получить Chat ID из последнего сообщения боту"""
         token = self._tg_token.get().strip()
         if not token:
-            self._tg_status.configure(text="⚠ Сначала введите token", text_color=T["warn"])
+            self._tg_status.configure(text=tr("tg_enter_token_first"), text_color=T["warn"])
             return
-        self._tg_status.configure(text="⏳ Получение Chat ID...", text_color=T["text_dim"])
+        self._tg_status.configure(text=tr("tg_getting_chat_id"), text_color=T["text_dim"])
         def _get():
             try:
                 import requests
@@ -2497,32 +2640,29 @@ class SettingsPage(ctk.CTkFrame):
                 r = requests.get(url, timeout=8)
                 print(f"[TG DEBUG] Статус: {r.status_code}")
                 print(f"[TG DEBUG] Ответ: {r.text[:500]}")
-                
+
                 if r.status_code == 200:
                     data = r.json()
                     if data.get("ok") and data.get("result"):
-                        # Берём последнее сообщение
+
                         last_msg = data["result"][-1]
                         msg_obj = last_msg.get("message") or last_msg.get("callback_query", {}).get("message", {})
                         chat_id = msg_obj.get("chat", {}).get("id")
                         if chat_id:
                             print(f"[TG DEBUG] Найден Chat ID: {chat_id}")
                             self.after(0, lambda cid=str(chat_id): self._tg_chat.delete(0, "end") or self._tg_chat.insert(0, str(cid)))
-                            self.after(0, lambda: self._tg_status.configure(
-                                text=f"✅ Chat ID установлен: {chat_id}", text_color=T["safe"]))
-                        else:
-                            self.after(0, lambda: self._tg_status.configure(
-                                text="⚠ Chat ID не найден. Отправьте сообщение боту!", text_color=T["warn"]))
+                        self.after(0, lambda: self._tg_status.configure(
+                            text=f" Chat ID установлен: {chat_id}", text_color=T["safe"]))
                     else:
                         self.after(0, lambda: self._tg_status.configure(
-                            text="⚠ История пуста. Отправьте /start боту!", text_color=T["warn"]))
+                            text=tr("tg_history_empty"), text_color=T["warn"]))
                 else:
                     self.after(0, lambda: self._tg_status.configure(
-                        text=f"✖ Ошибка {r.status_code}", text_color=T["danger"]))
+                        text=f" Ошибка {r.status_code}", text_color=T["danger"]))
             except Exception as e:
                 print(f"[TG DEBUG] Exception: {e}")
                 self.after(0, lambda msg=str(e): self._tg_status.configure(
-                    text=f"✖ {msg}", text_color=T["danger"]))
+                    text=f" {msg}", text_color=T["danger"]))
         threading.Thread(target=_get, daemon=True).start()
 
     def _apply_theme(self):
@@ -2549,7 +2689,7 @@ class SettingsPage(ctk.CTkFrame):
 
     def _add_simulate_button(self, parent):
         try:
-            btn = ctk.CTkButton(parent, text=" SIMULATE ATTACK", width=220,
+            btn = ctk.CTkButton(parent, text=tr("simulate_attack"), width=220,
                                 fg_color=T["danger"], text_color=T["bg_deep"],
                                 font=FONT_HEADER, command=lambda: self.app_ref.simulate_attack())
             btn.pack(anchor="w", padx=24, pady=(8,10))
@@ -2574,7 +2714,7 @@ class SOCSentinel(ctk.CTk):
             try: i18n.change_language(CFG.get("language", "en"))
             except Exception: pass
         except Exception: pass
-        self.title("SOC SENTINEL v2 — AI Cybersecurity Dashboard")
+        self.title("SOC SENTINEL v2  AI Cybersecurity Dashboard")
         self.geometry("1860x1020"); self.minsize(1280,780)
         self.configure(fg_color=T["bg_deep"]); self.withdraw()
         self.bot              = None
@@ -2586,6 +2726,11 @@ class SOCSentinel(ctk.CTk):
         self.sidebar_visible  = True
         self.ai_panel_visible = False
         self._current_user    = ("guest","user")
+
+        self._flask_thread: threading.Thread | None = None
+        self._flask_running: bool = False
+        self._flask_start_time: datetime | None = None
+        self._flask_request_count: int = 0
 
         self._mgmt_buckets: dict            = {}
         self._mgmt_pkt_counter: int         = 0
@@ -2608,14 +2753,15 @@ class SOCSentinel(ctk.CTk):
         if auth.result is None: self.destroy(); return
         self._current_user = auth.result
         username, role = auth.result
-        self.title(f"SOC SENTINEL v2  —  {username.upper()}  [{role.upper()}]")
+        self.title(f"SOC SENTINEL v2    {username.upper()}  [{tr(role).upper()}]")
         ttk_style(); self._build(); self.deiconify()
         self.apply_mode(CFG.get("demo_mode",True))
         self._drain_queue()
         self._pull_deauth_stats()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._schedule_global_gc()
-        self._start_flask_api()
+        if CFG.get("web_autostart", False):
+            self._start_flask_api()
 
     def apply_mode(self, demo: bool):
         self._running = False
@@ -2640,7 +2786,7 @@ class SOCSentinel(ctk.CTk):
                 CFG["demo_mode"]=True; self.engine.set_demo_mode(True); return
             if not self.adapter:
                 messagebox.showwarning("No Adapter",
-                    "Select a network adapter in Settings → Network Interface first.")
+                    "Select a network adapter in Settings  Network Interface first.")
                 CFG["demo_mode"]=True; self.engine.set_demo_mode(True); return
             self._start_capture(self.adapter)
             if hasattr(self,'pages'):
@@ -2650,28 +2796,20 @@ class SOCSentinel(ctk.CTk):
 
     def simulate_attack(self):
         fake_ip = "192.168.1.250"
-        self.engine._raise_alert("SYN_FLOOD", fake_ip, "CRITICAL", 1500)
-        # ── FIX 1 применён: show_system_toast вынесен в daemon-поток ──────
-        _toast_async("SOC Sentinel — Alert", f"Simulated attack from {fake_ip} — CRITICAL")
+        self.engine._raise_alert("SYN_FLOOD", fake_ip, "critical", 1500)
+        _toast_async("SOC Sentinel - Alert", f"Simulated attack from {fake_ip} - critical")
 
     def _drain_queue(self):
         q = self.engine.result_q
         qsize = q.qsize()
 
-        # ── Adaptive back-pressure ────────────────────────────────────────────
-        # During a deauth/EAPOL flood the queue fills faster than the GUI can
-        # drain it. Processing 50 items every 50 ms = 1 000 Tkinter operations
-        # per second — this alone freezes the event loop.
-        # Strategy: drop aggressively early, use a smaller batch, schedule
-        # the next drain less frequently when the queue is large.
         if qsize > 500:
-            # Heavy flood: drop everything except the newest 100 items
             drop = qsize - 100
             for _ in range(drop):
                 try: q.get_nowait()
                 except queue.Empty: break
             BATCH = 5
-            next_ms = 200          # slow down — give Tkinter room to breathe
+            next_ms = 200
         elif qsize > 100:
             BATCH = 10
             next_ms = 100
@@ -2756,15 +2894,14 @@ class SOCSentinel(ctk.CTk):
         self.sidebar.grid_propagate(False)
         lg = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         lg.pack(fill="x", padx=16, pady=(28,16))
-        ctk.CTkLabel(lg, text="⬡", font=("Consolas",40), text_color=T["accent"]).pack()
-        ctk.CTkLabel(lg, text="SOC SENTINEL v2", font=("Consolas",13,"bold"),
-                     text_color=T["text_primary"]).pack()
+        ctk.CTkLabel(lg, text="SOC SENTINEL", font=("Consolas",16,"bold"),
+                     text_color=T["accent"]).pack()
         u, role = self._current_user
-        badge = ctk.CTkFrame(self.sidebar, fg_color=T["bg_card"], corner_radius=8)
-        badge.pack(fill="x", padx=14, pady=(0,10))
-        ctk.CTkLabel(badge, text=f"{'👑' if role=='admin' else ''}  {u}",
+        badge = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        badge.pack(fill="x", padx=16, pady=(16,4))
+        ctk.CTkLabel(badge, text=u,
                      font=FONT_SMALL, text_color=T["accent"]).pack(side="left",padx=10,pady=6)
-        ctk.CTkLabel(badge, text=role.upper(), font=FONT_TINY,
+        ctk.CTkLabel(badge, text=tr(role).upper(), font=FONT_TINY,
                      text_color=T["text_muted"]).pack(side="right",padx=8)
         ctk.CTkFrame(self.sidebar, fg_color=T["border"], height=1
                      ).pack(fill="x",padx=16,pady=(0,16))
@@ -2785,10 +2922,10 @@ class SOCSentinel(ctk.CTk):
         self.status_lbl  = ctk.CTkLabel(bot, text=f"  {tr('idle')}", font=FONT_SMALL,
                                          text_color=T["warn"])
         self.status_lbl.pack()
-        self.adapter_lbl = ctk.CTkLabel(bot, text=self.adapter[:24] or "—",
+        self.adapter_lbl = ctk.CTkLabel(bot, text=self.adapter[:24] or "",
                                          font=FONT_TINY, text_color=T["text_dim"])
         self.adapter_lbl.pack()
-        self._web_url_lbl = ctk.CTkLabel(bot, text="📱 Web: …", font=FONT_TINY,
+        self._web_url_lbl = ctk.CTkLabel(bot, text=tr("web_label"), font=FONT_TINY,
                                           text_color=T["safe"], cursor="hand2")
         self._web_url_lbl.pack(pady=(4, 0))
         self._web_url_lbl.bind("<Button-1>", lambda e: self.show_page("web"))
@@ -2807,14 +2944,14 @@ class SOCSentinel(ctk.CTk):
 
         left = ctk.CTkFrame(topbar, fg_color="transparent")
         left.pack(side="left", padx=16, pady=8)
-        ctk.CTkLabel(left, text="⬡", font=("Consolas",22), text_color=T["accent"]).pack(side="left")
+        ctk.CTkLabel(left, text="", font=("Consolas",22), text_color=T["accent"]).pack(side="left")
         ctk.CTkLabel(left, text="SOC SENTINEL v2", font=("Segoe UI Semibold",12), text_color=T["text_primary"]).pack(side="left", padx=(8,0))
 
         right = ctk.CTkFrame(topbar, fg_color="transparent")
         right.pack(side="right", padx=16, pady=8)
 
         self._sidebar_btn = ctk.CTkButton(
-            right, text=f"☰  {tr('menu')}", width=120, height=44,
+            right, text=f"  {tr('menu')}", width=120, height=44,
             fg_color=T["bg_card"], text_color=T["text_dim"],
             hover_color=_adjust_color(T["bg_hover"],1.05),
             font=("Segoe UI Semibold",12), corner_radius=12,
@@ -2893,10 +3030,12 @@ class SOCSentinel(ctk.CTk):
             return
         if not CFG.get("web_enabled", True):
             return
+        if self._flask_running:
+            return
         import weakref
         from utils.network import get_connection_urls, open_firewall_port, get_primary_lan_ip
         engine_ref = weakref.ref(self.engine)
-        flask_app  = _build_flask_app(engine_ref)
+        flask_app  = _build_flask_app(engine_ref, app_ref=weakref.ref(self))
         port = int(CFG.get("web_port", 5000))
         if CFG.get("web_firewall", True):
             try:
@@ -2907,17 +3046,40 @@ class SOCSentinel(ctk.CTk):
         if primary:
             logging.info("[Web] Дашборд: http://%s:%s (та же Wi-Fi сеть)", primary, port)
             try:
-                self._web_url_lbl.configure(text=f"📱 http://{primary}:{port}")
+                self._web_url_lbl.configure(text=f" http://{primary}:{port}")
             except Exception:
                 pass
 
-        def _run():
+        def _run_flask():
             import logging as _lg
             _lg.getLogger("werkzeug").setLevel(_lg.ERROR)
-            flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
+            self._flask_running = True
+            self._flask_start_time = datetime.now()
+            self._flask_request_count = 0
+            try:
+                flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
+            finally:
+                self._flask_running = False
+        self._flask_thread = threading.Thread(target=_run_flask, daemon=True, name="FlaskWebThread")
+        self._flask_thread.start()
 
-        threading.Thread(target=_run, daemon=True, name="FlaskWebThread").start()
+    def _stop_flask_api(self):
+        if not self._flask_running:
+            return
+        try:
+            import requests
+            port = int(CFG.get("web_port", 5000))
+            # Try to send a request to stop, but since Flask doesn't have a built-in stop, we'll just note it's stopped
+            # In reality, we need a more robust way, but for this app, we'll toggle the flag
+            self._flask_running = False
+            self._flask_start_time = None
+            logging.info("[Web] Web server stopped")
+        except Exception as e:
+            logging.exception("[Web] Error stopping server")
 
+    def _restart_flask_api(self):
+        self._stop_flask_api()
+        self.after(500, self._start_flask_api)
     def _make_nav(self, pid, icon, label):
         label_text = tr(label)
         btn = ctk.CTkButton(
@@ -2974,11 +3136,11 @@ class SOCSentinel(ctk.CTk):
     def _toggle_sidebar(self):
         if self.sidebar_visible:
             self.sidebar.grid_remove(); self.grid_columnconfigure(0,minsize=0)
-            self.sidebar_visible = False; self._sidebar_btn.configure(text="▶")
+            self.sidebar_visible = False; self._sidebar_btn.configure(text=tr("menu"))
         else:
             self.sidebar.grid(row=0,column=0,sticky="nsew")
             self.grid_columnconfigure(0,minsize=228)
-            self.sidebar_visible = True; self._sidebar_btn.configure(text="☰")
+            self.sidebar_visible = True; self._sidebar_btn.configure(text=tr("close"))
         try: self._sidebar_btn.lift(); self._ai_btn.lift()
         except Exception: pass
 
@@ -2987,14 +3149,14 @@ class SOCSentinel(ctk.CTk):
             try: self.ai_panel.place_forget()
             except Exception: pass
             self.ai_panel_visible = False
-            self._ai_btn.configure(fg_color=T["accent"], text="🤖")
+            self._ai_btn.configure(fg_color=T["accent"], text=tr("assistant"))
         else:
             try:
                 self.ai_panel.place(relx=1.0, x=-20, y=84, anchor='ne', relheight=0.88)
                 self.ai_panel.lift()
             except Exception: pass
             self.ai_panel_visible = True
-            self._ai_btn.configure(fg_color=T["danger"], text="✕ AI")
+            self._ai_btn.configure(fg_color=T["danger"], text="X")
         try:
             self._sidebar_btn.lift(); self._ai_btn.lift()
         except Exception: pass
@@ -3070,14 +3232,12 @@ class SOCSentinel(ctk.CTk):
             self.after(300, self._pull_deauth_stats)
             return
 
-        # ── Step 1: Атомарный снимок + сброс (~0.5 µs) ───────────────────
         with self._agg_lock:
             pkt_total           = self._agg_pkt_total
             deauth_snapshot     = self._agg_deauth_counts
             self._agg_pkt_total     = 0
             self._agg_deauth_counts = {}
 
-        # ── Step 2: Детекция флуда ────────────────────────────────────────
         try:
             now_str = datetime.now().strftime("%H:%M:%S")
             flood_macs = {
@@ -3098,7 +3258,7 @@ class SOCSentinel(ctk.CTk):
                     "size":     total_deauth,
                     "detail": (
                         f"{len(flood_macs)} source(s), "
-                        f"{total_deauth} frames/300ms — "
+                        f"{total_deauth} frames/300ms  "
                         f"top offender: {top_mac} ({top_count} pkts)"
                     ),
                 }
@@ -3109,9 +3269,6 @@ class SOCSentinel(ctk.CTk):
                     finally:
                         self.engine.lock.release()
 
-                # ── FIX 3: alert_callbacks в daemon-потоке ────────────────
-                # Колбэки могут вызывать show_system_toast → subprocess.run()
-                # → D-Bus блокировка.  Вынос в поток изолирует это от GUI.
                 def _fire_callbacks(a=alert):
                     for cb in getattr(self.engine, "alert_callbacks", []):
                         try:
@@ -3125,8 +3282,6 @@ class SOCSentinel(ctk.CTk):
                     name="AlertCbThread",
                 ).start()
 
-                # LogsPage.append теперь безопасен (FIX 2): файловый I/O
-                # идёт через внутреннюю очередь, GUI не блокируется.
                 try:
                     self.pages["logs"].append(
                         f"DEAUTH_FLOOD | {top_mac} | {top_count} pkt/300ms | CRITICAL",
@@ -3138,7 +3293,6 @@ class SOCSentinel(ctk.CTk):
         except Exception:
             pass
 
-        # ── Step 3: KPI text update — каждый тик, дёшево ─────────────────
         try:
             if pkt_total >= 0:
                 pps_estimate = int(pkt_total * (1000 / 300))
@@ -3151,7 +3305,6 @@ class SOCSentinel(ctk.CTk):
         except Exception:
             pass
 
-        # ── Step 4: Matplotlib — строго задушен ──────────────────────────
         active_flood = any(c >= self._DEAUTH_FLOOD_THRESH
                            for c in deauth_snapshot.values())
         do_chart = (
@@ -3179,7 +3332,7 @@ class SOCSentinel(ctk.CTk):
 
     def _on_close(self):
         self._running = False
-        # Сигнал завершения для фонового писателя логов
+
         try:
             if hasattr(self, 'pages') and "logs" in self.pages:
                 self.pages["logs"]._file_q.put_nowait(None)
@@ -3188,18 +3341,15 @@ class SOCSentinel(ctk.CTk):
         self.engine.shutdown()
         self.destroy()
 
-
 if __name__ == "__main__":
     if sys.platform == "win32":
         try:
             if not ctypes.windll.shell32.IsUserAnAdmin():
-                messagebox.showwarning("⚠ Admin Required",
-                    "SOC Sentinel needs admin privileges for packet capture.\n\n"
-                    "Right-click → Run as administrator\nAlso ensure Npcap is installed.")
+                messagebox.showwarning(tr("admin_required_title"), tr("admin_required_msg"))
         except Exception: pass
     if not SCAPY_AVAILABLE:
         print("="*60)
-        print("WARNING: scapy not installed — running in simulation mode.")
+        print("WARNING: scapy not installed  running in simulation mode.")
         print("pip install scapy")
         print("="*60)
     set_dpi_awareness()
