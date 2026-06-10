@@ -1842,7 +1842,11 @@ class ThreatPage(ctk.CTkFrame):
 
     def _refresh_blocked(self):
         self.blk_box.configure(state="normal"); self.blk_box.delete("0.0","end")
-        txt = "\n".join(f"{ip}" for ip in sorted(self.engine.blocked_ips)) or tr("no_blocked_ips")
+        # Get all blocked IPs from both engine's set and active_response's set
+        all_blocked = set(self.engine.blocked_ips)
+        if hasattr(self.engine, "_ips") and hasattr(self.engine._ips, "blocked_ips"):
+            all_blocked.update(self.engine._ips.blocked_ips)
+        txt = "\n".join(f"{ip}" for ip in sorted(all_blocked)) or tr("no_blocked_ips")
         self.blk_box.insert("end",txt); self.blk_box.configure(state="disabled")
 
     def _tick(self):
@@ -2830,8 +2834,12 @@ class SOCSentinel(ctk.CTk):
 
     def simulate_attack(self):
         fake_ip = "192.168.1.250"
-        self.engine._raise_alert("SYN_FLOOD", fake_ip, "critical", 1500)
-        _toast_async("SOC Sentinel - Alert", f"Simulated attack from {fake_ip} - critical")
+        # Fixed severity to uppercase CRITICAL (matches rest of the system!)
+        self.engine._raise_alert("SYN_FLOOD", fake_ip, "CRITICAL", 1500)
+        # Also increment threat_count to fix dashboard KPI showing 0!
+        with self.engine.lock:
+            self.engine.threat_count += 1
+        _toast_async("SOC Sentinel - Alert", f"Simulated attack from {fake_ip} - CRITICAL")
 
     def _drain_queue(self):
         import logging
