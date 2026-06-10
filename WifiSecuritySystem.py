@@ -2074,6 +2074,8 @@ class WebAccessPage(ctk.CTkFrame):
             logging.error(f"WebAccessPage open error: {e}")
 
     def _tick(self):
+        import logging
+        logging.debug(f"[DBG-04] WebAccessPage._tick(): refresh starting")
         try:
             self._refresh()
         except Exception as e:
@@ -2832,8 +2834,10 @@ class SOCSentinel(ctk.CTk):
         _toast_async("SOC Sentinel - Alert", f"Simulated attack from {fake_ip} - critical")
 
     def _drain_queue(self):
+        import logging
         q = self.engine.result_q
         qsize = q.qsize()
+        logging.debug(f"[DBG-03] _drain_queue(): qsize={qsize}")
 
         if qsize > 500:
             drop = qsize - 100

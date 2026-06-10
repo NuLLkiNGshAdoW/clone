@@ -332,25 +332,65 @@ class ThreatEngine:
         return ok
 
     def analyze(self, pkt):
-        if not SCAPY_AVAILABLE: return "N/A", "#777", []
+        import logging
+        logging.debug(f"[DBG-01] analyze() entering: pkt_type={type(pkt)}")
+        if not SCAPY_AVAILABLE: 
+            logging.debug(f"[DBG-01] analyze(): SCAPY not available, exiting early")
+            return "N/A", "#777", []
         threats = []; now = time.time(); size = len(pkt)
         cfg = load_config()
+        
+        # ── FIRST: CHECK IF PACKET IS TO/FROM OUR OWN WEB PORT (IGNORE COMPLETELY) ──
+        web_port = int(cfg.get("web_port", 5000))
+        if pkt.haslayer(scapy.TCP):
+            tcp = pkt[scapy.TCP]
+            if tcp.dport == web_port or tcp.sport == web_port:
+                return " SAFE", "#0F0", []
+        
         with self.lock:
             self.packet_count += 1
             self.packet_stats["total"] += 1
             self.packet_stats["bytes"] += size
 
-            # ── CHECK WHITELIST FIRST (IGNORE COMPLETELY IF WHITELISTED) ──
+            # ── AUTO-WHITELIST: GET ALL LOCAL IP ADDRESSES ──
+            from utils.network import get_local_ips
+            local_ips = set(entry["ip"] for entry in get_local_ips())
+            local_ips.add("127.0.0.1")
+            local_ips.add("::1")
+            
             src_ip = None
-            src_mac = None
             if pkt.haslayer(scapy.IP):
                 src_ip = pkt[scapy.IP].src
-            if hasattr(pkt, 'src') and pkt.src:
-                src_mac = pkt.src
-            # Check both IP and MAC for whitelist
-            if (src_ip and is_whitelisted(src_ip)) or (src_mac and is_whitelisted(src_mac)):
-                logging.debug("[Whitelist] Ignoring packet from whitelisted %s/%s", src_ip, src_mac)
-                return " SAFE", "#0F0", []
+            # Also check if it's our own MAC (if available)
+            local_macs = set()
+            try:
+                from psutil import net_if_addrs
+                for iface_name, addrs in net_if_addrs():
+                    for addr in addrs:
+                        if hasattr(addr, 'address'):
+                            if len(addr.address) == 17 and addr.address.count(":") == 5:
+                                local_macs.add(addr.address.lower())
+            except Exception:
+                pass
+            
+            # ── CHECK WHITELIST FIRST (IGNORE COMPLETELY IF WHITELISTED) ──
+            # Check MAC addresses
+            if hasattr(pkt, 'src'):
+                if pkt.src in local_macs:
+                    return " SAFE", "#0F0", []
+            if hasattr(pkt, 'dst'):
+                if pkt.dst in local_macs:
+                    return " SAFE", "#0F0", []
+            # Check IP addresses
+            if pkt.haslayer(scapy.IP):
+                src = pkt[scapy.IP].src
+                dst = pkt[scapy.IP].dst
+                if src in local_ips or dst in local_ips:
+                    return " SAFE", "#0F0", []
+                # Also check user-defined whitelist
+                if is_whitelisted(src):
+                    logging.debug("[Whitelist] Ignoring packet from whitelisted %s", src)
+                    return " SAFE", "#0F0", []
 
             # per-IP rate tracking (packets per second sliding window)
             if pkt.haslayer(scapy.IP):
@@ -720,10 +760,13 @@ class ThreatEngine:
         return "General"
 
     def _raise_alert(self, atype, actor, sev, size):
+        import logging
+        logging.debug(f"[DBG-02] _raise_alert(): atype={atype}, actor={actor}, sev={sev}, size={size}")
         a = {"time": datetime.now().strftime("%H:%M:%S"), "type": atype,
-             "actor": actor, "severity": sev, "size": size}
-        self.alerts.append(a)
-        if len(self.alerts) > 2000: self.alerts = self.alerts[-1000:]
+            "actor": actor, "severity": sev, "size": size}
+        with self.lock:
+            self.alerts.append(a)
+            if len(self.alerts) > 2000: self.alerts = self.alerts[-1000:]
         for cb in self.alert_callbacks:
             try: cb(a)
             except Exception:
