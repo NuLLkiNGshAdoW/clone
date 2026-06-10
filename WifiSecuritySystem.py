@@ -2000,64 +2000,84 @@ class WebAccessPage(ctk.CTkFrame):
     def _open_config(self):
         import subprocess
         import sys
+        import os
         config_path = Path("sentinel_config.json").resolve()
-        if sys.platform == "win32":
-            os.startfile(config_path)
-        elif sys.platform == "darwin":
-            subprocess.call(["open", str(config_path)])
-        else:
-            subprocess.call(["xdg-open", str(config_path)])
+        try:
+            if sys.platform == "win32":
+                os.startfile(config_path)
+            elif sys.platform == "darwin":
+                subprocess.call(["open", str(config_path)])
+            else:
+                subprocess.call(["xdg-open", str(config_path)])
+        except Exception as e:
+            self._log_message(f"Error opening config: {e}")
 
     def _refresh(self):
-        from utils.network import get_connection_urls
-        port = int(CFG.get("web_port", 5000))
-        urls = get_connection_urls(port)
-        lines = [f" {u['label']}: {u['url']}" for u in urls] or [" Wi-Fi IP не найден"]
-        self._url_box.configure(state="normal")
-        self._url_box.delete("0.0", "end")
-        self._url_box.insert("end", "\n".join(lines))
-        self._url_box.configure(state="disabled")
-        self._primary = urls[0]["url"] if urls else ""
+        try:
+            from utils.network import get_connection_urls
+            port = int(CFG.get("web_port", 5000))
+            urls = get_connection_urls(port)
+            lines = [f" {u['label']}: {u['url']}" for u in urls] or [" Wi-Fi IP не найден"]
+            try:
+                self._url_box.configure(state="normal")
+                self._url_box.delete("0.0", "end")
+                self._url_box.insert("end", "\n".join(lines))
+                self._url_box.configure(state="disabled")
+            except Exception: pass
+            self._primary = urls[0]["url"] if urls else ""
 
-        # Update KPIs from app_ref
-        if self.app_ref:
-            # Status
-            if self.app_ref._flask_running:
-                self._kpi_status.set(tr("active_status"))
-                self._kpi_status.set_color(T["safe"])
-            else:
-                self._kpi_status.set(tr("blocked_status"))
-                self._kpi_status.set_color(T["danger"])
-            # Requests
-            self._kpi_requests.set(str(self.app_ref._flask_request_count))
-            # Uptime
-            if self.app_ref._flask_running and self.app_ref._flask_start_time:
-                delta = datetime.now() - self.app_ref._flask_start_time
-                total_secs = int(delta.total_seconds())
-                hours, remainder = divmod(total_secs, 3600)
-                mins, secs = divmod(remainder, 60)
-                if hours > 0:
-                    uptime_str = f"{hours}h {mins}m {secs}s"
-                elif mins > 0:
-                    uptime_str = f"{mins}m {secs}s"
-                else:
-                    uptime_str = f"{secs}s"
-                self._kpi_uptime.set(uptime_str)
-            else:
-                self._kpi_uptime.set("0s")
+            # Update KPIs from app_ref
+            if self.app_ref:
+                try:
+                    # Status
+                    if self.app_ref._flask_running:
+                        self._kpi_status.set(tr("active_status"))
+                        self._kpi_status.set_color(T["safe"])
+                    else:
+                        self._kpi_status.set(tr("blocked_status"))
+                        self._kpi_status.set_color(T["danger"])
+                    # Requests
+                    self._kpi_requests.set(str(self.app_ref._flask_request_count))
+                    # Uptime
+                    if self.app_ref._flask_running and self.app_ref._flask_start_time:
+                        delta = datetime.now() - self.app_ref._flask_start_time
+                        total_secs = int(delta.total_seconds())
+                        hours, remainder = divmod(total_secs, 3600)
+                        mins, secs = divmod(remainder, 60)
+                        if hours > 0:
+                            uptime_str = f"{hours}h {mins}m {secs}s"
+                        elif mins > 0:
+                            uptime_str = f"{mins}m {secs}s"
+                        else:
+                            uptime_str = f"{secs}s"
+                        self._kpi_uptime.set(uptime_str)
+                    else:
+                        self._kpi_uptime.set("0s")
+                except Exception: pass
+        except Exception as e:
+            logging.error(f"WebAccessPage refresh error: {e}")
 
     def _copy(self):
-        if getattr(self, "_primary", None):
-            self.clipboard_clear()
-            self.clipboard_append(self._primary)
+        try:
+            if getattr(self, "_primary", None):
+                self.clipboard_clear()
+                self.clipboard_append(self._primary)
+        except Exception as e:
+            logging.error(f"WebAccessPage copy error: {e}")
 
     def _open(self):
-        import webbrowser
-        if getattr(self, "_primary", None):
-            webbrowser.open(self._primary)
+        try:
+            import webbrowser
+            if getattr(self, "_primary", None):
+                webbrowser.open(self._primary)
+        except Exception as e:
+            logging.error(f"WebAccessPage open error: {e}")
 
     def _tick(self):
-        self._refresh()
+        try:
+            self._refresh()
+        except Exception as e:
+            logging.error(f"WebAccessPage tick error: {e}")
         self.after(2000, self._tick)
 
 class TopologyPage(ctk.CTkFrame):
