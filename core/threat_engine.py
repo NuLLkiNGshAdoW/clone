@@ -205,10 +205,14 @@ class ThreatEngine:
 
         try:
             import os
-            workers = max(4, os.cpu_count() or 4)
+            workers = min(4, os.cpu_count() or 4)
         except Exception:
             workers = 4
-        self._executor = ThreadPoolExecutor(max_workers=workers)
+        self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ThreatEngine")
+        self._submit_sem = threading.BoundedSemaphore(workers + 80)
+        self._submit_drop_last = 0.0
+        self._device_fp_lock = threading.Lock()
+        self._stats_cache = (dict(self.packet_stats), dict(self.proto_counts), dict(self.app_counts))
         self.result_q = queue.Queue(maxsize=20000)
 
         self._demo = False
@@ -287,17 +291,21 @@ class ThreatEngine:
     def _refresh_config(self):
         now = time.time()
         if now - self._cfg_last_refresh > self._cfg_refresh_interval:
-            self._cfg = load_config()
-            self.SIGS = _get_sigs_from_cfg(self._cfg)
-            self._cfg_last_refresh = now
+            with self.lock:
+                self._cfg = load_config()
+                self.SIGS = _get_sigs_from_cfg(self._cfg)
+                self._cfg_last_refresh = now
         return self._cfg
 
     def _refresh_local_network(self):
         now = time.time()
         if now - self._local_network_last_refresh > self._local_network_refresh:
-            self._local_ips = self._load_local_ips()
-            self._local_macs = self._load_local_macs()
-            self._local_network_last_refresh = now
+            local_ips = self._load_local_ips()
+            local_macs = self._load_local_macs()
+            with self.lock:
+                self._local_ips = local_ips
+                self._local_macs = local_macs
+                self._local_network_last_refresh = now
 
     def set_demo_mode(self, enabled: bool):
         # Create demo generator lazily so core owns demo lifecycle
@@ -338,20 +346,26 @@ class ThreatEngine:
             if self.result_q.qsize() > 100:
                 logging.debug("[ThreatEngine] submit(): dropping pkt because result_q is busy qsize=%s", self.result_q.qsize())
                 return
-            work_queue = getattr(self._executor, '_work_queue', None)
-            if work_queue is not None and work_queue.qsize() > 100:
-                logging.debug("[ThreatEngine] submit(): dropping pkt because executor queue is busy qsize=%s", work_queue.qsize())
+            if not self._submit_sem.acquire(blocking=False):
+                now = time.time()
+                if now - self._submit_drop_last > 2.0:
+                    logging.debug("[ThreatEngine] submit(): dropping pkt because task ingress is overloaded")
+                    self._submit_drop_last = now
                 return
-            self._executor.submit(self._analyze_and_queue, pkt)
+            future = self._executor.submit(self._analyze_and_queue, pkt)
+            future.add_done_callback(lambda f: self._submit_sem.release())
         except RuntimeError:
+            try:
+                self._submit_sem.release()
+            except Exception:
+                pass
             logging.exception("Executor not accepting new tasks")
 
     def _analyze_and_queue(self, pkt):
         try:
-            status, color, threats = ("N/A", "#777", [])
+            status, color, threats, app = ("N/A", "#777", [], "Unknown")
             if SCAPY_AVAILABLE:
-                status, color, threats = self.analyze(pkt)
-            app = self._identify_app(pkt) if SCAPY_AVAILABLE else "Unknown"
+                status, color, threats, app = self.analyze(pkt)
             src = pkt[scapy.IP].src if SCAPY_AVAILABLE and pkt.haslayer(scapy.IP) else "?"
             dst = pkt[scapy.IP].dst if SCAPY_AVAILABLE and pkt.haslayer(scapy.IP) else "?"
             size = len(pkt) if hasattr(pkt, '__len__') else 0
@@ -396,71 +410,71 @@ class ThreatEngine:
         logging.debug(f"[DBG-01] analyze() entering: pkt_type={type(pkt)}")
         if not SCAPY_AVAILABLE:
             logging.debug(f"[DBG-01] analyze(): SCAPY not available, exiting early")
-            return "N/A", "#777", []
+            return "N/A", "#777", [], "Unknown"
 
         cfg = self._refresh_config()
         web_port = int(cfg.get("web_port", 5000))
+        cfg_web_port = web_port
         if pkt.haslayer(scapy.TCP):
             tcp = pkt[scapy.TCP]
             if tcp.dport == web_port or tcp.sport == web_port:
-                return " SAFE", "#0F0", []
+                return " SAFE", "#0F0", [], self._identify_app(pkt)
 
         now = time.time()
         size = len(pkt)
         threats = []
+        app = self._identify_app(pkt)
 
         pkt_ip = pkt[scapy.IP] if pkt.haslayer(scapy.IP) else None
-        src_ip = pkt_ip.src if pkt_ip else None
+        src = pkt_ip.src if pkt_ip else None
+        dst = pkt_ip.dst if pkt_ip else None
 
+        self._refresh_local_network()
+        local_ips = set(self._local_ips)
+        local_ips.add("127.0.0.1")
+        local_ips.add("::1")
+        local_macs = self._local_macs
+
+        if pkt_ip and pkt_ip.src in local_ips:
+            return " SAFE", "#0F0", [], app
+
+        if hasattr(pkt, 'src') and isinstance(pkt.src, str) and pkt.src.lower() in local_macs:
+            return " SAFE", "#0F0", [], app
+        if hasattr(pkt, 'dst') and isinstance(pkt.dst, str) and pkt.dst.lower() in local_macs:
+            return " SAFE", "#0F0", [], app
+
+        if pkt_ip:
+            src = pkt_ip.src
+            dst = pkt_ip.dst
+            if src in local_ips or dst in local_ips:
+                return " SAFE", "#0F0", [], app
+            if is_whitelisted(src):
+                logging.debug("[Whitelist] Ignoring packet from whitelisted %s", src)
+                return " SAFE", "#0F0", [], app
+
+        ip_rate_queue = None
+        arp_mac = None
+        block_check = False
         with self.lock:
             self.packet_count += 1
             self.packet_stats["total"] += 1
             self.packet_stats["bytes"] += size
 
-            self._refresh_local_network()
-            local_ips = set(self._local_ips)
-            local_ips.add("127.0.0.1")
-            local_ips.add("::1")
-            local_macs = self._local_macs
-
-            if pkt_ip and pkt_ip.src in local_ips:
-                return " SAFE", "#0F0", []
-
-            if hasattr(pkt, 'src') and isinstance(pkt.src, str) and pkt.src.lower() in local_macs:
-                return " SAFE", "#0F0", []
-            if hasattr(pkt, 'dst') and isinstance(pkt.dst, str) and pkt.dst.lower() in local_macs:
-                return " SAFE", "#0F0", []
+            if pkt_ip and src in self.blocked_ips:
+                self.packet_stats["blocked"] += 1
+                return "🚫 BLOCKED", "#800080", [], app
 
             if pkt_ip:
-                src = pkt_ip.src
-                dst = pkt_ip.dst
-                if src in local_ips or dst in local_ips:
-                    return " SAFE", "#0F0", []
-                if is_whitelisted(src):
-                    logging.debug("[Whitelist] Ignoring packet from whitelisted %s", src)
-                    return " SAFE", "#0F0", []
-
-                dq = self.ip_rate[src]
-                dq.append(now)
+                ip_rate_queue = self.ip_rate[src]
+                ip_rate_queue.append(now)
                 window = 2.0
-                while dq and now - dq[0] > window:
-                    dq.popleft()
-                pps = len(dq)
-                pps_thresh = cfg.get("pps_thresh", 200)
-                if pps >= pps_thresh:
+                while ip_rate_queue and now - ip_rate_queue[0] > window:
+                    ip_rate_queue.popleft()
+                if len(ip_rate_queue) >= cfg.get("pps_thresh", 200):
                     threats.append(("HIGH_PPS", src, "HIGH"))
-            else:
-                src = None
-                dst = None
 
-            if cfg.get("device_fingerprint_enabled", True) and pkt_ip:
-                src_fp = pkt_ip.src
-                vend = ""
-                if self.arp_table.get(src_fp):
-                    if not _OUI_CACHE:
-                        load_oui()
-                    vend = lookup_vendor(self.arp_table.get(src_fp))
-                threats.extend(self._device_fp.analyze_packet(pkt, src_fp, vendor=vend, now=now))
+            if pkt_ip and cfg.get("device_fingerprint_enabled", True):
+                arp_mac = self.arp_table.get(src)
 
             if pkt.haslayer(scapy.ARP):
                 self.proto_counts["ARP"] += 1
@@ -473,20 +487,25 @@ class ThreatEngine:
                     self.arp_table[ip_a] = mac
 
             if not pkt_ip:
-                return " SAFE", "#0F0", []
+                self.app_counts[app] += 1
+                self._app_recent_ts.append((now, app))
+                while self._app_recent_ts and now - self._app_recent_ts[0][0] > self._APP_WINDOW:
+                    old_app = self._app_recent_ts.popleft()[1]
+                    if self.app_counts_recent[old_app] > 0:
+                        self.app_counts_recent[old_app] -= 1
+                self.app_counts_recent[app] += 1
+                return " SAFE", "#0F0", [], app
 
-            if src in self.blocked_ips or self._ips.is_blocked(src):
+            if self._ips.is_blocked(src):
                 self.packet_stats["blocked"] += 1
-                return "🚫 BLOCKED", "#800080", []
+                return "🚫 BLOCKED", "#800080", [], app
 
             vendor = None
-            if self.arp_table:
+            if self.arp_table and arp_mac:
                 try:
                     if not _OUI_CACHE:
                         load_oui()
-                    mac = self.arp_table.get(src)
-                    if mac:
-                        vendor = lookup_vendor(mac)
+                    vendor = lookup_vendor(arp_mac)
                 except Exception:
                     vendor = None
 
@@ -504,8 +523,6 @@ class ThreatEngine:
                 while self.port_scan_track[src] and (now - self.port_scan_track[src][0][0]) > scan_window:
                     self.port_scan_track[src].popleft()
                 unique_ports = set(dp for _, dp in self.port_scan_track[src])
-                # Also, skip localhost/web ports (to avoid false positives from our own web UI)
-                cfg_web_port = cfg.get("web_port", 5000)
                 if len(unique_ports) >= self.SIGS.get("PORT_SCAN", {}).get("thresh", 15):
                     if not (src in ("127.0.0.1", "::1") or (len(unique_ports) == 1 and cfg_web_port in unique_ports)):
                         threats.append(("PORT_SCAN", src, "HIGH"))
@@ -533,40 +550,49 @@ class ThreatEngine:
                     threats.append(("ICMP_FLOOD", src, "MEDIUM"))
             else:
                 self.proto_counts["OTHER"] += 1
+
             if size >= self.SIGS.get("DATA_EXFIL", {}).get("thresh", 8*1024):
                 threats.append(("DATA_EXFIL", src, "CRITICAL"))
-            app = self._identify_app(pkt)
-            self.app_counts[app] += 1
 
-            # ── ИСПРАВЛЕНИЕ: скользящее окно для графика "последние 60 сек" ──
-            # Без этого LAN накапливается часами и YouTube не виден в топе.
+            self.app_counts[app] += 1
             self._app_recent_ts.append((now, app))
-            # Сдвигаем окно — убираем устаревшие записи
             while self._app_recent_ts and now - self._app_recent_ts[0][0] > self._APP_WINDOW:
                 old_app = self._app_recent_ts.popleft()[1]
                 if self.app_counts_recent[old_app] > 0:
                     self.app_counts_recent[old_app] -= 1
             self.app_counts_recent[app] += 1
 
-            # ── ИСПРАВЛЕНИЕ: используем кешированный конфиг ──
             if cfg.get("auto_block") and threats:
                 for ttype, actor, sev in threats:
                     if sev in ("CRITICAL", "HIGH") and actor not in self._ips.ignored:
                         self.block_attacker(actor, reason=ttype, severity=sev, threat_type=ttype)
-            for ttype, actor, sev in threats:
-                self._raise_alert(ttype, actor, sev, size)
-                # persist alerts to DB async if available
-                try:
-                    db = get_db()
-                    if db:
-                        db.insert_alert({"time": datetime.now().strftime("%H:%M:%S"), "type": ttype, "actor": actor, "severity": sev, "size": size})
-                except Exception:
-                    pass
+
             if threats:
                 self.threat_count += 1
-                return f"⚠ {threats[0][0]}", "#FF3B5C", threats
-            if pkt.haslayer(scapy.ICMP): return "● ICMP", "#00D4FF", []
-            return " SAFE", "#00FF88", []
+
+        if cfg.get("device_fingerprint_enabled", True) and pkt_ip:
+            try:
+                if arp_mac and not _OUI_CACHE:
+                    load_oui()
+                device_threats = self._device_fp.analyze_packet(pkt, src, vendor=vendor if 'vendor' in locals() else None, now=now)
+            except Exception:
+                device_threats = []
+            threats.extend(device_threats)
+
+        for ttype, actor, sev in list(threats):
+            self._raise_alert(ttype, actor, sev, size)
+            try:
+                db = get_db()
+                if db:
+                    db.insert_alert({"time": datetime.now().strftime("%H:%M:%S"), "type": ttype, "actor": actor, "severity": sev, "size": size})
+            except Exception:
+                pass
+
+        if threats:
+            return f"⚠ {threats[0][0]}", "#FF3B5C", threats, app
+        if pkt.haslayer(scapy.ICMP):
+            return "● ICMP", "#00D4FF", [], app
+        return " SAFE", "#00FF88", [], app
 
     def _identify_app(self, pkt):
         """
@@ -941,65 +967,85 @@ class ThreatEngine:
             time.sleep(0.05)
 
     def get_stats(self):
-        with self.lock:
-            # Отдаём app_counts_recent (скользящее окно 60 сек) для графика —
-            # так YouTube появится в топе СРАЗУ как только открыт, а LAN
-            # не будет доминировать накопленной статистикой за часы работы.
-            return (dict(self.packet_stats),
-                    dict(self.proto_counts),
-                    dict(self.app_counts_recent) if self.app_counts_recent
-                    else dict(self.app_counts))
+        acquired = self.lock.acquire(timeout=0.02)
+        if not acquired:
+            return self._stats_cache
+        try:
+            stats = dict(self.packet_stats)
+            protos = dict(self.proto_counts)
+            apps = dict(self.app_counts_recent) if self.app_counts_recent else dict(self.app_counts)
+            self._stats_cache = (stats, protos, apps)
+            return stats, protos, apps
+        finally:
+            self.lock.release()
 
     def get_snapshot(self):
+        now = datetime.now()
         with self.lock:
-            now = datetime.now()
-            recent_alerts = []
-            for a in self.alerts[-200:]:
-                try:
-                    at = datetime.strptime(a["time"], "%H:%M:%S").replace(
-                        year=now.year, month=now.month, day=now.day)
-                    if abs((now - at).total_seconds()) < 60:
-                        recent_alerts.append(a)
-                except Exception:
-                    logging.exception("Failed to parse alert time")
+            alerts = list(self.alerts[-200:])
+            packet_stats = dict(self.packet_stats)
+            proto_counts = dict(self.proto_counts)
+            top_apps = dict(sorted(
+                (self.app_counts_recent if self.app_counts_recent else self.app_counts).items(),
+                key=lambda x: x[1], reverse=True)[:8]
+            )
+            blocked_ips = list(self.blocked_ips)
+            security_plugins = list(self._plugins)
+            arp_hosts = len(self.arp_table)
+            active_conns = len(self.proc_map)
+            threat_count = self.threat_count
+            mode = "SIMULATION" if getattr(self, '_demo', False) else "LIVE"
+            ips_mode = "IPS" if load_config().get("auto_block") else "IDS"
 
-            top_attackers = collections.Counter(
-                a["actor"] for a in recent_alerts
-            ).most_common(5)
+        recent_alerts = []
+        for a in alerts:
+            try:
+                at = datetime.strptime(a["time"], "%H:%M:%S").replace(
+                    year=now.year, month=now.month, day=now.day)
+                if abs((now - at).total_seconds()) < 60:
+                    recent_alerts.append(a)
+            except Exception:
+                logging.exception("Failed to parse alert time")
 
-            wifi_stats, risk = {}, {}
-            if getattr(self, "_wifi_monitor", None):
-                try:
-                    wifi_stats = self._wifi_monitor.get_stats()
-                    from core.wifi_risk import compute_risk_score
-                    risk = compute_risk_score(wifi_stats, recent_alerts,
-                        self._wifi_monitor.get_heatmap() if hasattr(self._wifi_monitor, "get_heatmap") else [])
-                except Exception:
-                    pass
-            return {
-                "mode": "SIMULATION" if getattr(self, '_demo', False) else "LIVE",
-                "ips_mode": "IPS" if load_config().get("auto_block") else "IDS",
-                "wifi_risk": risk, "wifi_stats": wifi_stats,
-                "total_packets": self.packet_stats.get("total", 0),
-                "total_bytes":   self.packet_stats.get("bytes", 0),
-                "blocked_pkts":  self.packet_stats.get("blocked", 0),
-                "threat_events": self.threat_count,
-                "blocked_ips":   list(self.blocked_ips),
-                "protocols":     dict(self.proto_counts),
-                "top_apps":      dict(sorted(
-                    (self.app_counts_recent if self.app_counts_recent else self.app_counts).items(),
-                    key=lambda x: x[1], reverse=True)[:8]),
-                "alerts_last60s": [
-                    {"time": a["time"], "type": a["type"],
-                     "actor": a["actor"], "sev": a["severity"]}
-                    for a in recent_alerts[-20:]
-                ],
-                "top_attackers": [{"ip": ip, "alerts": n} for ip, n in top_attackers],
-                "arp_hosts":     len(self.arp_table),
-                "active_conns":  len(self.proc_map),
-                "security": {"ips": self._ips.get_snapshot(), "devices": self._device_fp.get_all()[:20],
-                             "plugins": self._plugins},
-            }
+        top_attackers = collections.Counter(
+            a["actor"] for a in recent_alerts
+        ).most_common(5)
+
+        wifi_stats, risk = {}, {}
+        if getattr(self, "_wifi_monitor", None):
+            try:
+                wifi_stats = self._wifi_monitor.get_stats()
+                from core.wifi_risk import compute_risk_score
+                risk = compute_risk_score(wifi_stats, recent_alerts,
+                    self._wifi_monitor.get_heatmap() if hasattr(self._wifi_monitor, "get_heatmap") else [])
+            except Exception:
+                pass
+
+        return {
+            "mode": mode,
+            "ips_mode": ips_mode,
+            "wifi_risk": risk,
+            "wifi_stats": wifi_stats,
+            "total_packets": packet_stats.get("total", 0),
+            "total_bytes": packet_stats.get("bytes", 0),
+            "blocked_pkts": packet_stats.get("blocked", 0),
+            "threat_events": threat_count,
+            "blocked_ips": blocked_ips,
+            "protocols": proto_counts,
+            "top_apps": top_apps,
+            "alerts_last60s": [
+                {"time": a["time"], "type": a["type"], "actor": a["actor"], "sev": a["severity"]}
+                for a in recent_alerts[-20:]
+            ],
+            "top_attackers": [{"ip": ip, "alerts": n} for ip, n in top_attackers],
+            "arp_hosts": arp_hosts,
+            "active_conns": active_conns,
+            "security": {
+                "ips": self._ips.get_snapshot(),
+                "devices": self._device_fp.get_all()[:20],
+                "plugins": security_plugins,
+            },
+        }
 
     def reload_sigs(self):
         cfg = load_config(); self.SIGS = _get_sigs_from_cfg(cfg)

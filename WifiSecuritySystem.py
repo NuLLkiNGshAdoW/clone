@@ -3502,19 +3502,27 @@ class SOCSentinel(ctk.CTk):
         logging.debug(f"[DBG-03] _drain_queue(): qsize={qsize}, page={current_page}")
 
         if qsize > 500:
-            drop = qsize - 100
+            drop = qsize - 120
+            for _ in range(drop):
+                try: q.get_nowait()
+                except queue.Empty: break
+            logging.debug("[DBG-03] _drain_queue(): dropped %s stale results", drop)
+            BATCH = 4
+            next_ms = 300
+        elif qsize > 200:
+            drop = qsize - 120
             for _ in range(drop):
                 try: q.get_nowait()
                 except queue.Empty: break
             logging.debug("[DBG-03] _drain_queue(): dropped %s stale results", drop)
             BATCH = 5
-            next_ms = 200
+            next_ms = 220
         elif qsize > 100:
-            BATCH = 8
-            next_ms = 120
+            BATCH = 6
+            next_ms = 140
         else:
-            BATCH = 12
-            next_ms = 60
+            BATCH = 10
+            next_ms = 80
 
         processed = 0
         while processed < BATCH:
@@ -4030,8 +4038,9 @@ class SOCSentinel(ctk.CTk):
                     )
                 return
 
-            if self.engine.result_q.qsize() >= 50:
-                logging.debug("[Sniffer] drop packet: result_q full qsize=%s", self.engine.result_q.qsize())
+            qsize = self.engine.result_q.qsize()
+            if qsize >= 30:
+                logging.debug("[Sniffer] drop packet: result_q backlog qsize=%s", qsize)
                 return
             self.engine.submit(pkt)
 
