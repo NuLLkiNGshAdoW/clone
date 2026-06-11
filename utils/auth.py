@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
+from utils.crypto import load_json_encrypted, encrypt_json
+
 USERS_FILE = Path("sentinel_users.json")
 ROLES = {"admin": {"can_block": True, "can_config": True},
          "operator": {"can_block": True, "can_config": False},
@@ -36,6 +38,12 @@ def upgrade_password_on_login(username: str, password: str, users: dict):
 
 
 def load_users() -> dict:
+    users_enc_path = USERS_FILE.with_suffix(USERS_FILE.suffix + ".enc")
+    if users_enc_path.exists():
+        try:
+            return load_json_encrypted(USERS_FILE, {})
+        except Exception:
+            pass
     if USERS_FILE.exists():
         try:
             with open(USERS_FILE, encoding="utf-8") as f:
@@ -49,6 +57,11 @@ def load_users() -> dict:
 
 
 def save_users(users: dict):
+    try:
+        if encrypt_json(USERS_FILE, users):
+            return
+    except Exception:
+        pass
     with open(USERS_FILE, "w", encoding="utf-8") as f:
         json.dump(users, f, indent=2)
 

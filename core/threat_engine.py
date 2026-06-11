@@ -7,6 +7,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from collections import deque, defaultdict
+from typing import Optional
 
 from utils.config import load_config
 from .detector import ThreatDetector
@@ -207,6 +208,7 @@ class ThreatEngine:
         self._demo_gen = None
 
         self._ips = ActiveResponse(load_config, on_block=self._on_ips_block)
+        self.blocked_ips = self._ips.blocked_ips  # Sync ThreatEngine blocked_ips with ActiveResponse's
         self._device_fp = DeviceFingerprinter(cfg.get("behavior_score_threshold", 70))
         self._plugins = load_all_plugins(engine=self)
 
@@ -320,14 +322,17 @@ class ThreatEngine:
             if rec.get("kind") == "ip":
                 self.blocked_ips.add(rec.get("target", ""))
 
-    def block_attacker(self, target, reason="", severity="HIGH", threat_type="IPS_BLOCK"):
+    def block_attacker(self, target, reason="", severity="HIGH", threat_type="IPS_BLOCK", use_firewall: Optional[bool] = None):
         import logging
-        logging.info(f"[ThreatEngine] block_attacker вызван для target={target}, reason={reason}")
-        res = self._ips.block_attacker(target, reason=reason, severity=severity, threat_type=threat_type)
+        logging.info(f"[ThreatEngine] block_attacker вызван для target={target}, reason={reason}, threat_type={threat_type}, use_firewall={use_firewall}")
+        res = self._ips.block_attacker(target, reason=reason, severity=severity, threat_type=threat_type, use_firewall=use_firewall)
         logging.info(f"[ThreatEngine] Результат block_attacker: {res}")
         if res.get("ok") and res.get("kind") == "ip":
             self.blocked_ips.add(target)
             logging.info(f"[ThreatEngine] Добавили {target} в self.blocked_ips! Теперь blocked_ips: {self.blocked_ips}")
+            # Создаём alert при блокировании
+            self._raise_alert(threat_type, target, severity, 0)
+            logging.info(f"[ThreatEngine] Alert создан при блокировании {target}")
         return res
 
     def unblock_target(self, target):
@@ -775,8 +780,16 @@ class ThreatEngine:
             try: cb(a)
             except Exception:
                 logging.exception("Alert callback failed")
+        
+        # Не отправляем дублирующееся сообщение в Telegram для alert типа TG_BLOCK
+        # (уже отправили ответ на callback)
+        if atype == "TG_BLOCK":
+            logging.info(f"[TelegramBot] Пропускаем отправку Telegram для TG_BLOCK alert (уже отправили ответ на callback)")
+            return
+        
         target_bot = self.bot or self._tg_bot
-        # If actor is whitelisted, skip sending Telegram notifications
+        logging.info(f"[TelegramBot] self.bot is {self.bot}, self._tg_bot is {self._tg_bot}, target_bot is {target_bot}")
+        # If actor is whitelisted, skip sending notifications
         try:
             if actor and is_whitelisted(actor):
                 logging.info("[Whitelist] actor %s is whitelisted; skipping notifications", actor)
@@ -784,7 +797,35 @@ class ThreatEngine:
         except Exception:
             pass
         if target_bot and sev in ("CRITICAL", "HIGH"):
+            logging.info(f"[TelegramBot] calling send_alert for {actor}")
             threading.Thread(target=target_bot.send_alert, args=(a,), daemon=True).start()
+        else:
+            logging.warning(f"[TelegramBot] NOT sending alert: target_bot={target_bot}, sev={sev}")
+
+        # Send new notifications (Email, Discord, Slack, System Toasts)
+        cfg = load_config()
+        try:
+            from utils.notifications import NotificationManager
+            nm = NotificationManager(cfg)
+            subject = f"[SOC Sentinel] {sev} ALERT: {atype} from {actor}"
+            body = f"Type: {atype}\nActor: {actor}\nSeverity: {sev}\nSize: {size} bytes\nTime: {a.get('time')}"
+            use_email = all(k in cfg and cfg[k] for k in ["email_server", "email_user", "email_password", "email_recipient"])
+            use_discord = "discord_webhook" in cfg and cfg["discord_webhook"]
+            use_slack = "slack_webhook" in cfg and cfg["slack_webhook"]
+            use_toast = "system_toasts" in cfg and cfg["system_toasts"]
+            if any([use_email, use_discord, use_slack, use_toast]):
+                nm.send_all(subject, body, use_email=use_email, use_discord=use_discord, 
+                           use_slack=use_slack, use_toast=use_toast)
+            # Send generic webhook if configured
+            webhook_url = cfg.get("webhook_url", "")
+            if webhook_url:
+                import requests
+                try:
+                    requests.post(webhook_url, json=a, timeout=5)
+                except Exception:
+                    logging.exception("Failed to send generic webhook")
+        except Exception:
+            logging.exception("Failed to send extended notifications")
 
     def block_ip(self, ip, reason="", severity="HIGH"):
         self.block_attacker(ip, reason=reason or "Manual block", severity=severity, threat_type="MANUAL_BLOCK")
@@ -996,3 +1037,42 @@ class ThreatEngine:
         if self.bot is None:
             logging.info("[TelegramBot] self.bot is None, вызов _init_telegram")
             self._init_telegram()
+            
+    def simulate_syn_flood(self, count=100):
+        """Simulate SYN flood attack"""
+        attack_ip = self._rand_ip()
+        for _ in range(count):
+            self._raise_alert("SYN_FLOOD", attack_ip, "CRITICAL", 64)
+        logging.info(f"Simulated SYN flood from {attack_ip}")
+        
+    def simulate_icmp_flood(self, count=100):
+        """Simulate ICMP flood attack"""
+        attack_ip = self._rand_ip()
+        for _ in range(count):
+            self._raise_alert("ICMP_FLOOD", attack_ip, "MEDIUM", 64)
+        logging.info(f"Simulated ICMP flood from {attack_ip}")
+        
+    def simulate_port_scan(self, count=20):
+        """Simulate port scan attack"""
+        attack_ip = self._rand_ip()
+        for _ in range(count):
+            self._raise_alert("PORT_SCAN", attack_ip, "HIGH", 64)
+        logging.info(f"Simulated port scan from {attack_ip}")
+        
+    def simulate_data_exfil(self, count=5, size=1000000):
+        """Simulate data exfiltration"""
+        attack_ip = self._rand_ip()
+        for _ in range(count):
+            self._raise_alert("DATA_EXFIL", attack_ip, "CRITICAL", size)
+        logging.info(f"Simulated data exfiltration from {attack_ip}")
+        
+    def simulate_all_attacks(self):
+        """Simulate all types of attacks"""
+        self.simulate_syn_flood()
+        self.simulate_icmp_flood()
+        self.simulate_port_scan()
+        self.simulate_data_exfil()
+        
+    def _rand_ip(self, private=True):
+        if private: return f"192.168.{random.randint(1,5)}.{random.randint(2,250)}"
+        return f"{random.randint(1,223)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}"

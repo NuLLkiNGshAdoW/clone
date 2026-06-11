@@ -19,31 +19,57 @@ DEFAULT = {
     "web_firewall": True,
     "device_fingerprint_enabled": True,
     "behavior_score_threshold": 70,
-    "encrypt_config": False,
+    "encrypt_config": True,
     "encrypt_db": False,
+    "web_api_key": "",
 }
 
 def load_config():
+    cfg = None
+    # First, try loading with crypto.py for backwards compatibility
     try:
         from utils.crypto import load_json_encrypted
         cfg = load_json_encrypted(CONFIG_FILE, DEFAULT)
-        for k, v in DEFAULT.items():
-            cfg.setdefault(k, v)
-        return cfg
     except Exception:
         pass
-    if CONFIG_FILE.exists():
-        try:
-            with open(CONFIG_FILE, encoding="utf-8") as f:
-                cfg = json.load(f)
-            for k, v in DEFAULT.items():
-                cfg.setdefault(k, v)
-            return cfg
-        except Exception:
-            pass
-    return dict(DEFAULT)
+    # If that didn't work, load plain JSON
+    if cfg is None:
+        if CONFIG_FILE.exists():
+            try:
+                with open(CONFIG_FILE, encoding="utf-8") as f:
+                    cfg = json.load(f)
+            except Exception:
+                pass
+    # If still None, use defaults
+    if cfg is None:
+        cfg = dict(DEFAULT)
+    
+    # Now, set defaults for missing keys
+    for k, v in DEFAULT.items():
+        cfg.setdefault(k, v)
+    
+    # Now decrypt sensitive values using utils/encryption.py
+    try:
+        from utils.encryption import get_or_create_key, decrypt_config_values
+        key = get_or_create_key()
+        cfg = decrypt_config_values(cfg, key)
+    except Exception as e:
+        import logging
+        logging.exception("Failed to decrypt config values")
+        
+    return cfg
 
 def save_config(cfg):
+    # First, encrypt sensitive values using utils/encryption.py
+    try:
+        from utils.encryption import get_or_create_key, encrypt_config_values
+        key = get_or_create_key()
+        cfg = encrypt_config_values(cfg.copy(), key)
+    except Exception as e:
+        import logging
+        logging.exception("Failed to encrypt config values")
+        
+    # Now save
     try:
         if cfg.get("encrypt_config"):
             from utils.crypto import encrypt_json

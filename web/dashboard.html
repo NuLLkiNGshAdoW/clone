@@ -138,7 +138,7 @@ body {
 /* ── ALERTS ── */
 .alert-list { padding: 0 16px; display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
 .alert-row {
-  display: flex; align-items: flex-start; gap: 10px;
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
   padding: 10px 12px;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -159,6 +159,16 @@ body {
 .sev-HIGH     { background: rgba(245,158,11,.12); color: var(--warn);   border: 1px solid rgba(245,158,11,.25); }
 .sev-MEDIUM   { background: rgba(0,201,255,.1);   color: var(--accent); border: 1px solid rgba(0,201,255,.2); }
 .sev-LOW      { background: rgba(16,185,129,.1);  color: var(--safe);   border: 1px solid rgba(16,185,129,.2); }
+.block-btn {
+  font-size: 10px;
+  background: var(--danger);
+  color: white;
+  border: none;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-top: 6px;
+}
 
 /* ── PROTO TABLE ── */
 .proto-wrap { padding: 0 16px 12px; }
@@ -228,6 +238,58 @@ body {
   background: var(--bg);
   border: 1px solid var(--border2);
   border-radius: 8px;
+}
+
+/* ── BLOCK CONTROLS ── */
+.block-controls {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.block-input {
+  flex: 1;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+}
+.block-btn-add {
+  padding: 10px 16px;
+  border-radius: 8px;
+  border: none;
+  background: var(--danger);
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+}
+.block-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.block-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.block-item-ip {
+  font-family: 'SF Mono', monospace;
+  font-weight: 600;
+  color: var(--danger);
+}
+.unblock-btn {
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--muted);
+  cursor: pointer;
 }
 
 /* ── NAV ── */
@@ -345,6 +407,20 @@ nav button svg { display: block; }
 
 </div>
 
+<!-- BLOCKS -->
+<div id="p-blocks" class="panel">
+  <div class="sec-hdr"><div class="sec-title">Активные блокировки</div></div>
+  <div class="info-card">
+    <div class="block-controls">
+      <input type="text" id="block-ip" class="block-input" placeholder="IP для блокировки">
+      <button id="block-submit" class="block-btn-add">Блокировать</button>
+    </div>
+    <div class="block-list" id="blockList">
+      <div class="empty">Загрузка...</div>
+    </div>
+  </div>
+</div>
+
 <!-- INFO -->
 <div id="p-info" class="panel">
   <div class="info-card">
@@ -372,6 +448,10 @@ nav button svg { display: block; }
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
     Дашборд
   </button>
+  <button id="nav-blocks" onclick="tab('blocks',this)">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
+    Блокировки
+  </button>
   <button id="nav-info" onclick="tab('info',this)">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="8.01"/><polyline points="11 12 12 12 12 16"/></svg>
     Подключение
@@ -386,6 +466,7 @@ function tab(id, btn) {
   document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   if (id === 'info') loadWhitelist();
+  if (id === 'blocks') loadBlocks();
 }
 
 // ── Severity chart (horizontal stacked bar) ───────────────────
@@ -431,7 +512,7 @@ async function loadWhitelist(){
   const el = document.getElementById('wl-list');
   el.innerHTML = 'Загрузка...';
   try{
-    const r = await fetch('/api/whitelist');
+    const r = await fetchWithAuth('/api/whitelist');
     if(!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
     renderWhitelist(data);
@@ -451,7 +532,7 @@ function renderWhitelist(list){
   }).join('');
   document.querySelectorAll('.wl-rem').forEach(b=>b.onclick = async e=>{
     const id = e.currentTarget.getAttribute('data-id');
-    try{ const r = await fetch('/api/whitelist/' + encodeURIComponent(id), {method:'DELETE'}); if(r.ok) loadWhitelist(); }
+    try{ const r = await fetchWithAuth('/api/whitelist/' + encodeURIComponent(id), {method:'DELETE'}); if(r.ok) loadWhitelist(); }
     catch(err){ console.debug('wl remove err', err); }
   });
 }
@@ -461,9 +542,54 @@ document.getElementById('wl-add').addEventListener('click', async ()=>{
   const name = document.getElementById('wl-name').value.trim();
   if(!id) return;
   try{
-    const r = await fetch('/api/whitelist', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id, name})});
+    const r = await fetchWithAuth('/api/whitelist', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id, name})});
     if(r.ok){ document.getElementById('wl-id').value=''; document.getElementById('wl-name').value=''; loadWhitelist(); }
   }catch(err){ console.debug('wl add err', err); }
+});
+
+// ── Blocked IPs UI ───────────────────────────────────────────
+async function loadBlocks(){
+  const el = document.getElementById('blockList');
+  el.innerHTML = 'Загрузка...';
+  try{
+    const r = await fetchWithAuth('/api/stats');
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    renderBlocks(data.blocked_ips || []);
+  }catch(err){
+    el.innerHTML = '<div class="empty conn-err">Ошибка загрузки</div>';
+    console.debug('blocks load err', err);
+  }
+}
+
+function renderBlocks(list){
+  const el = document.getElementById('blockList');
+  if(!list || !list.length){ el.innerHTML = '<div class="empty">Нет заблокированных IP</div>'; return; }
+  el.innerHTML = list.map(ip => `
+    <div class="block-item">
+      <div class="block-item-ip">${ip}</div>
+      <button class="unblock-btn" data-ip="${ip}">Разблокировать</button>
+    </div>`
+  ).join('');
+  document.querySelectorAll('.unblock-btn').forEach(b=>b.onclick = async e=>{
+    const ip = e.currentTarget.getAttribute('data-ip');
+    try{
+      const r = await fetchWithAuth('/api/block/' + encodeURIComponent(ip), {method:'DELETE'});
+      if(r.ok) loadBlocks();
+    }catch(err){ console.debug('unblock err', err); }
+  });
+}
+
+document.getElementById('block-submit').addEventListener('click', async ()=>{
+  const ip = document.getElementById('block-ip').value.trim();
+  if(!ip) return;
+  try{
+    const r = await fetchWithAuth('/api/block/' + encodeURIComponent(ip), {method:'POST'});
+    if(r.ok){
+      document.getElementById('block-ip').value='';
+      loadBlocks();
+    }
+  }catch(err){ console.debug('block err', err); }
 });
 
 function updateSevChart(threats) {
@@ -514,16 +640,38 @@ function renderAlerts(alerts) {
   count.textContent = alerts.length + ' событий';
   list.innerHTML = alerts.map(a => {
     const sev = (a.severity || 'low').toUpperCase();
-    const actor = a.actor_name || a.actor || a.src_name || a.src || '—';
+    const actorName = a.actor_name || a.actor || a.src_name || a.src || '—';
+    const actorIp = a.actor || a.src || '';  // Use the actual IP for blocking!
     return `<div class="alert-row" style="--sev-color:${sevColor(sev)}">
       <div class="alert-body">
         <div class="alert-type">${a.type || '—'}</div>
-        <div class="alert-actor">${actor}</div>
+        <div class="alert-actor">${actorName}</div>
         <div class="alert-time">${a.time || ''}</div>
+        <button class="block-btn" data-actor="${actorIp}">Заблокировать</button>
       </div>
       <span class="sev-badge sev-${sev}">${sev}</span>
     </div>`;
   }).join('');
+  document.querySelectorAll('.block-btn').forEach(b=>b.onclick = async e=>{
+    const btn = e.currentTarget;
+    const actor = btn.getAttribute('data-actor');
+    // Disable button to prevent duplicate clicks
+    btn.disabled = true;
+    btn.textContent = 'Заблокировано';
+    btn.style.backgroundColor = '#4A6080';
+    btn.style.cursor = 'not-allowed';
+    try{
+      const r = await fetchWithAuth('/api/block/' + encodeURIComponent(actor), {method:'POST'});
+      if(r.ok) loadBlocks();
+    }catch(err){ 
+      console.debug('block from alert err', err); 
+      // Re-enable if there was an error
+      btn.disabled = false;
+      btn.textContent = 'Заблокировать';
+      btn.style.backgroundColor = '';
+      btn.style.cursor = '';
+    }
+  });
 }
 
 function sevColor(sev) {
@@ -548,6 +696,29 @@ function renderNodes(nodes) {
     </div>`).join('');
 }
 
+// ── API key management ────────────────────────────────────────
+let apiKey = null;
+
+function getApiKey() {
+  if (apiKey) return apiKey;
+  const params = new URLSearchParams(window.location.search);
+  apiKey = params.get('api_key');
+  return apiKey;
+}
+
+function addApiKeyToUrl(url) {
+  const key = getApiKey();
+  if (!key) return url;
+  const separator = url.includes('?') ? '&' : '?';
+  return `${url}${separator}api_key=${encodeURIComponent(key)}`;
+}
+
+async function fetchWithAuth(url, options = {}) {
+  const key = getApiKey();
+  const fullUrl = addApiKeyToUrl(url);
+  return fetch(fullUrl, options);
+}
+
 // ── API polling ───────────────────────────────────────────────
 let refreshInFlight = false;
 const STATS_REFRESH_INTERVAL_MS = 5000;
@@ -555,6 +726,7 @@ const STATS_REFRESH_INTERVAL_MS = 5000;
 async function loadNet() {
   try {
     const d = await (await fetch('/api/network')).json();
+    if (d.api_key && !apiKey) apiKey = d.api_key;
     const url = d.primary_url || '—';
     document.getElementById('mainUrl').textContent = url;
     document.getElementById('netSubtitle').textContent = d.hostname || 'SOC Sentinel';
@@ -571,7 +743,7 @@ async function refresh() {
   }
   refreshInFlight = true;
   try {
-    const s = await (await fetch('/api/stats')).json();
+    const s = await (await fetchWithAuth('/api/stats')).json();
 
     document.getElementById('kpi-pkts').textContent = (s.packets || 0).toLocaleString('ru');
     document.getElementById('kpi-bytes').textContent = (s.bytes_mb || 0).toFixed(1);

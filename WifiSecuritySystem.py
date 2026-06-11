@@ -141,8 +141,39 @@ def _resolve_service(ip: str, port: int = 0) -> str:
     return svc if svc else ip
 
 def _build_flask_app(engine_ref, app_ref=None) -> "Flask":
+    from functools import wraps
+    import secrets
+
     flask_app = Flask("SOCSentinel")
     CORS(flask_app, resources={r"/api/*": {"origins": "*"}})
+
+    # API Key management
+    def get_or_create_api_key():
+        cfg = load_config()
+        key = cfg.get("web_api_key", "")
+        if not key:
+            key = secrets.token_urlsafe(32)
+            cfg["web_api_key"] = key
+            save_config(cfg)
+        return key
+
+    # Authentication decorator
+    def require_api_key(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            api_key = get_or_create_api_key()
+            # Extract API key from header or query parameter
+            auth_header = request.headers.get('Authorization')
+            key_from_header = None
+            if auth_header and auth_header.startswith('Bearer '):
+                key_from_header = auth_header.split('Bearer ')[1]
+            key_from_query = request.args.get('api_key')
+            provided_key = key_from_header or key_from_query
+            
+            if provided_key != api_key:
+                return jsonify({'error': 'Unauthorized - Invalid API key'}), 401
+            return f(*args, **kwargs)
+        return decorated_function
 
     @flask_app.before_request
     def _count_request():
@@ -164,6 +195,7 @@ def _build_flask_app(engine_ref, app_ref=None) -> "Flask":
     _api_stats_cache: list = [None]
 
     @flask_app.route("/api/stats")
+    @require_api_key
     def api_stats():
         engine = engine_ref()
         if engine is None:
@@ -238,6 +270,7 @@ def _build_flask_app(engine_ref, app_ref=None) -> "Flask":
         })
 
     @flask_app.route("/api/health")
+    @require_api_key
     def api_health():
         return jsonify({"ok": True, "service": "SOC Sentinel"})
 
@@ -254,15 +287,26 @@ def _build_flask_app(engine_ref, app_ref=None) -> "Flask":
         port = int(load_config().get("web_port", 5000))
         urls = get_connection_urls(port)
         primary = get_primary_lan_ip()
+        api_key = get_or_create_api_key()
+        # Include API key in URLs for convenience
+        urls_with_key = []
+        for url in urls:
+            if "?" in url:
+                urls_with_key.append(f"{url}&api_key={api_key}")
+            else:
+                urls_with_key.append(f"{url}?api_key={api_key}")
+        primary_url = f"http://{primary}:{port}?api_key={api_key}" if primary else None
         return jsonify({"port": port, "hostname": socket.gethostname(),
-            "primary_ip": primary, "primary_url": f"http://{primary}:{port}" if primary else None,
-            "urls": urls, "same_network_required": True})
+            "primary_ip": primary, "primary_url": primary_url,
+            "urls": urls_with_key, "api_key": api_key, "same_network_required": True})
 
     @flask_app.route("/api/whitelist", methods=["GET"])
+    @require_api_key
     def api_whitelist_get():
         return jsonify(get_whitelist())
 
     @flask_app.route("/api/whitelist", methods=["POST"])
+    @require_api_key
     def api_whitelist_add():
         req = request.get_json(silent=True) or {}
         ident = (req.get("id") or req.get("identifier") or "").strip()
@@ -273,9 +317,38 @@ def _build_flask_app(engine_ref, app_ref=None) -> "Flask":
         return jsonify(data)
 
     @flask_app.route("/api/whitelist/<ident>", methods=["DELETE"])
+    @require_api_key
     def api_whitelist_remove(ident):
         data = remove_whitelist_entry(ident)
         return jsonify(data)
+        
+    @flask_app.route("/api/block/<ip>", methods=["POST"])
+    @require_api_key
+    def api_block_ip(ip):
+        engine = engine_ref()
+        if engine:
+            engine.block_ip(ip)
+            return jsonify({"ok": True, "ip": ip})
+        return jsonify({"error": "Engine not available"}), 503
+        
+    @flask_app.route("/api/block/<ip>", methods=["DELETE"])
+    @require_api_key
+    def api_unblock_ip(ip):
+        engine = engine_ref()
+        if engine:
+            engine.unblock_ip(ip)
+            return jsonify({"ok": True, "ip": ip})
+        return jsonify({"error": "Engine not available"}), 503
+        
+    @flask_app.route("/api/alerts", methods=["GET"])
+    @require_api_key
+    def api_alerts():
+        engine = engine_ref()
+        if engine:
+            with engine.lock:
+                alerts = list(engine.alerts[-200:])
+            return jsonify(alerts)
+        return jsonify({"error": "Engine not available"}), 503
 
     return flask_app
 
@@ -306,12 +379,31 @@ DEFAULT_CONFIG = {
     "web_log_requests": False,
     "device_fingerprint_enabled": True,
     "behavior_score_threshold": 70,
+    "web_api_key": "",
+    "encrypt_config": True,
+    # New features
+    "email_server": "smtp.gmail.com",
+    "email_port": "587",
+    "email_user": "",
+    "email_password": "",
+    "email_recipient": "",
+    "discord_webhook": "",
+    "slack_webhook": "",
+    "system_toasts": False,
+    "virustotal_api": "",
+    "abuseipdb_api": "",
+    "auto_backup": False,
+    "backup_interval": "24",
 }
 
 from utils.auth import (
     load_users as _auth_load_users, save_users as _auth_save_users,
     authenticate, register_user, upgrade_password_on_login, can as rbac_can,
 )
+from utils.encryption import (
+    get_or_create_key, encrypt_config_values, decrypt_config_values
+)
+from utils.crypto import load_json_encrypted, encrypt_json
 
 def load_users():
     return _auth_load_users()
@@ -319,19 +411,42 @@ def load_users():
 def save_users(u):
     _auth_save_users(u)
 
+_ENCRYPTION_KEY = None
+
+def _get_key():
+    global _ENCRYPTION_KEY
+    if _ENCRYPTION_KEY is None:
+        _ENCRYPTION_KEY = get_or_create_key()
+    return _ENCRYPTION_KEY
+
 def load_config():
-    if CONFIG_FILE.exists():
+    global _ENCRYPTION_KEY
+    config_enc_path = CONFIG_FILE.with_suffix(CONFIG_FILE.suffix + ".enc")
+    if CONFIG_FILE.exists() or config_enc_path.exists():
         try:
-            with open(CONFIG_FILE) as f:
-                cfg = json.load(f)
-            for k, v in DEFAULT_CONFIG.items(): cfg.setdefault(k, v)
+            if config_enc_path.exists():
+                cfg = load_json_encrypted(CONFIG_FILE, DEFAULT_CONFIG)
+            else:
+                with open(CONFIG_FILE, encoding="utf-8") as f:
+                    cfg = json.load(f)
+            for k, v in DEFAULT_CONFIG.items():
+                cfg.setdefault(k, v)
+            cfg = decrypt_config_values(cfg, _get_key())
             return cfg
         except Exception:
             logging.exception("Error loading config file")
     return dict(DEFAULT_CONFIG)
 
 def save_config(cfg):
-    with open(CONFIG_FILE, "w") as f: json.dump(cfg, f, indent=2)
+    cfg_encrypted = encrypt_config_values(dict(cfg), _get_key())
+    if cfg_encrypted.get("encrypt_config"):
+        try:
+            if encrypt_json(CONFIG_FILE, cfg_encrypted):
+                return
+        except Exception:
+            logging.exception("Failed to save encrypted config")
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg_encrypted, f, indent=2)
 
 CFG   = load_config()
 USERS = load_users()
@@ -651,8 +766,8 @@ class AuthWindow(ctk.CTkToplevel):
                              corner_radius=8)
             e.pack(fill="x"); return e
         self._user_ent = field("username", "username")
-        self._pass_ent = field("password", "password", "")
-        self._pass2_ent = field("confirm_password", "confirm_password", "") if mode == "register" else None
+        self._pass_ent = field("password", "password", "•")
+        self._pass2_ent = field("confirm_password", "confirm_password", "•") if mode == "register" else None
         self._role_var  = None
 
     def _refresh_mode(self):
@@ -1612,18 +1727,49 @@ class AnalyzerPage(ctk.CTkFrame):
 
     def _export(self):
         try:
-            path = filedialog.asksaveasfilename(
-                defaultextension=".csv",
-                filetypes=[("CSV", "*.csv"), ("All", "*.*")],
+            # Let user choose the format
+            import tkinter as tk
+            from tkinter import simpledialog
+            choice = simpledialog.askstring(
+                tr("export"),
+                "Choose format: JSON, PDF, or CSV (default: CSV)",
+                parent=self
             )
-            if not path: return
-            rows = [self.tree.item(iid)["values"]
-                    for iid in self.tree.get_children()]
-            with open(path, "w", newline="", encoding="utf-8") as f:
-                w = csv.writer(f)
-                w.writerow(["#", "time", "src", "dst", "proto", "app", "size", "status"])
-                w.writerows(rows)
-            messagebox.showinfo(tr("export"), f"{len(rows)} rows saved.\n{path}")
+            choice = (choice or "csv").strip().lower()
+            
+            if choice in ["json", "pdf"]:
+                # Export incidents/alerts
+                path = filedialog.asksaveasfilename(
+                    defaultextension=f".{choice}",
+                    filetypes=[
+                        (f"{choice.upper()} files", f"*.{choice}"),
+                        ("All files", "*.*")
+                    ],
+                )
+                if not path:
+                    return
+                if choice == "json":
+                    from utils.report_export import export_json
+                    export_json(path, self.engine.alerts)
+                else:  # pdf
+                    from utils.report_export import export_pdf
+                    export_pdf(path, self.engine.alerts)
+                messagebox.showinfo(tr("export"), f"Incidents exported to {path}")
+            else:
+                # Original CSV export of packets
+                path = filedialog.asksaveasfilename(
+                    defaultextension=".csv",
+                    filetypes=[("CSV", "*.csv"), ("All", "*.*")],
+                )
+                if not path:
+                    return
+                rows = [self.tree.item(iid)["values"]
+                        for iid in self.tree.get_children()]
+                with open(path, "w", newline="", encoding="utf-8") as f:
+                    w = csv.writer(f)
+                    w.writerow(["#", "time", "src", "dst", "proto", "app", "size", "status"])
+                    w.writerows(rows)
+                messagebox.showinfo(tr("export"), f"{len(rows)} rows saved.\n{path}")
         except Exception:
             logging.exception("[AnalyzerPage] _export error")
 
@@ -1809,10 +1955,89 @@ class ThreatPage(ctk.CTkFrame):
         ctk.CTkButton(row, text=f"  {tr('unblock')}", width=110, fg_color=T["safe"],
                       text_color=T["bg_deep"], font=FONT_SMALL, corner_radius=DEFAULT_CORNER,
                       command=self._unblock).pack(side="left",padx=4)
+        ctk.CTkButton(row, text=f"  {tr('check_ip')}", width=110, fg_color=T["accent"],
+                      text_color=T["bg_deep"], font=FONT_SMALL, corner_radius=DEFAULT_CORNER,
+                      command=self._check_ip).pack(side="left",padx=4)
         self.blk_box = ctk.CTkTextbox(bot, height=70, fg_color=T["bg_card"],
                                        text_color=T["accent_purple"], font=FONT_MONO)
         self.blk_box.pack(fill="x",padx=16,pady=(0,14))
         self._refresh_blocked()
+
+    def _sel_alert(self, evt):
+        sel = self.atree.selection()
+        if not sel: return
+        item = self.atree.item(sel[0])
+        vals = item["values"]
+        if len(vals)>=3: self.ip_ent.delete(0,"end"); self.ip_ent.insert(0, vals[2])
+
+    def _block(self):
+        ip = self.ip_ent.get().strip()
+        if not ip: messagebox.showwarning(tr('ip_control'),tr('fill_fields')); return
+        self.engine.block_ip(ip); self._refresh_blocked()
+
+    def _unblock(self):
+        ip = self.ip_ent.get().strip()
+        if not ip: messagebox.showwarning(tr('ip_control'),tr('fill_fields')); return
+        self.engine.unblock_ip(ip); self._refresh_blocked()
+
+    def _refresh_blocked(self):
+        try:
+            self.blk_box.delete(1.0, "end")
+            if self.engine.blocked_ips:
+                lst = "\n".join([f"  {x}" for x in sorted(self.engine.blocked_ips)])
+                self.blk_box.insert(1.0, f"[BLOCKED IPS]\n{lst}")
+        except Exception: pass
+
+    def _tick(self):
+        try:
+            counts = collections.defaultdict(int)
+            for a in self.engine.alerts[-1000:]: counts[a.get("severity","LOW").lower()] +=1
+            for sev in self.sev_cards: self.sev_cards[sev].set(counts.get(sev,0))
+        except Exception: pass
+        self.after(1000, self._tick)
+
+    def _check_ip(self):
+        ip = self.ip_ent.get().strip()
+        if not ip:
+            messagebox.showwarning(tr('ip_control'), tr('fill_fields'))
+            return
+        threading.Thread(target=self._check_ip_thread, args=(ip,), daemon=True).start()
+
+    def _check_ip_thread(self, ip):
+        try:
+            from utils.integrations import IntegrationsManager
+            mgr = IntegrationsManager(CFG)
+            vt_result = mgr.check_virustotal_ip(ip)
+            abuseipdb_result = mgr.check_abuseipdb_ip(ip)
+            self.after(0, lambda: self._show_ip_check_results(ip, vt_result, abuseipdb_result))
+        except Exception as e:
+            logging.exception("Failed to check IP")
+            self.after(0, lambda: messagebox.showerror("Error", str(e)))
+
+    def _show_ip_check_results(self, ip, vt_result, abuseipdb_result):
+        win = ctk.CTkToplevel(self)
+        win.title(f"IP Check: {ip}")
+        win.geometry("700x600")
+        win.resizable(True, True)
+        box = ctk.CTkTextbox(win, fg_color=T["bg_card"], text_color=T["text_primary"], font=FONT_MONO)
+        box.pack(fill="both", expand=True, padx=20, pady=20)
+        box.insert("end", f"[IP CHECK RESULTS FOR {ip}]\n\n")
+        
+        if vt_result.get("error"):
+            box.insert("end", f"[VirusTotal]\n{vt_result['error']}\n\n")
+        else:
+            stats = vt_result.get("last_analysis_stats", {})
+            box.insert("end", f"[VirusTotal]\nMalicious: {stats.get('malicious',0)}\nSuspicious: {stats.get('suspicious',0)}\nHarmless: {stats.get('harmless',0)}\nUndetected: {stats.get('undetected',0)}\n\n")
+        
+        if abuseipdb_result.get("error"):
+            box.insert("end", f"[AbuseIPDB]\n{abuseipdb_result['error']}\n\n")
+        else:
+            score = abuseipdb_result.get("abuseConfidenceScore", 0)
+            reports = abuseipdb_result.get("totalReports", 0)
+            last_report = abuseipdb_result.get("lastReportedAt", "")
+            box.insert("end", f"[AbuseIPDB]\nConfidence Score: {score}\nTotal Reports: {reports}\nLast Report: {last_report}\n\n")
+        
+        box.configure(state="disabled")
 
     def _on_alert(self, a):
         def _insert():
@@ -1825,38 +2050,87 @@ class ThreatPage(ctk.CTkFrame):
             except Exception: pass
         try: self.after(0, _insert)
         except Exception: pass
+        
+class ActiveBlocksPage(ctk.CTkFrame):
+    def __init__(self, master, engine, **kw):
+        super().__init__(master, fg_color="transparent", **kw)
+        self.engine = engine
+        self._build()
+        self._tick()
+        try:
+            i18n.register(self.refresh_ui)
+            self.bind("<Destroy>", lambda e: i18n.unregister(self.refresh_ui))
+        except Exception:
+            pass
 
-    def _sel_alert(self, _):
-        sel = self.atree.selection()
-        if sel:
-            v = self.atree.item(sel[0])["values"]
-            if v: self.ip_ent.delete(0,"end"); self.ip_ent.insert(0,str(v[2]))
+    def _build(self):
+        top = ctk.CTkFrame(self, fg_color=T["bg_panel"], corner_radius=12)
+        top.pack(fill="both", expand=True, padx=20, pady=(20, 8))
+        section_label(top, tr("active_blocks"), tr("active_blocks_desc"))
+        cols = ("type", "target", "added")
+        self.btree = ttk.Treeview(top, columns=cols, show="headings", style="Alert.Treeview")
+        for col, w in zip(cols, [100, 200, 150]):
+            self.btree.heading(col, text=tr("col_type") if col == "type" else tr("col_target") if col == "target" else tr("col_added"))
+            self.btree.column(col, width=w, anchor="w")
+        bsb = ttk.Scrollbar(top, orient="vertical", command=self.btree.yview)
+        self.btree.configure(yscrollcommand=bsb.set)
+        bsb.pack(side="right", fill="y", padx=(0,4))
+        self.btree.pack(fill="both", expand=True, padx=4, pady=(0,8))
 
-    def _block(self):
-        ip = self.ip_ent.get().strip()
-        if ip: self.engine.block_ip(ip); self._refresh_blocked()
+        bot = ctk.CTkFrame(self, fg_color=T["bg_panel"], corner_radius=12)
+        bot.pack(fill="x", padx=20, pady=(0,20))
+        row = ctk.CTkFrame(bot, fg_color="transparent"); row.pack(fill="x", padx=16, pady=(10,10))
+        ctk.CTkButton(row, text=f"  {tr('unblock')}", width=140, fg_color=T["accent"], text_color=T["bg_deep"],
+                      font=FONT_SMALL, corner_radius=DEFAULT_CORNER, command=self._unblock_selected).pack(side="left", padx=4)
+        ctk.CTkButton(row, text=f"  {tr('refresh')}", width=140, fg_color=T["bg_card"], text_color=T["text_primary"],
+                      font=FONT_SMALL, corner_radius=DEFAULT_CORNER, command=self._refresh_blocks).pack(side="left", padx=4)
+        self._refresh_blocks()
 
-    def _unblock(self):
-        ip = self.ip_ent.get().strip()
-        if ip: self.engine.unblock_ip(ip); self._refresh_blocked()
-
-    def _refresh_blocked(self):
-        self.blk_box.configure(state="normal"); self.blk_box.delete("0.0","end")
-        # Get all blocked IPs from both engine's set and active_response's set
-        all_blocked = set(self.engine.blocked_ips)
+    def _refresh_blocks(self):
+        for iid in self.btree.get_children():
+            self.btree.delete(iid)
+        # Get blocked IPs
+        blocked_ips = set()
+        if hasattr(self.engine, "blocked_ips"):
+            blocked_ips.update(self.engine.blocked_ips)
         if hasattr(self.engine, "_ips") and hasattr(self.engine._ips, "blocked_ips"):
-            all_blocked.update(self.engine._ips.blocked_ips)
-        txt = "\n".join(f"{ip}" for ip in sorted(all_blocked)) or tr("no_blocked_ips")
-        self.blk_box.insert("end",txt); self.blk_box.configure(state="disabled")
+            blocked_ips.update(self.engine._ips.blocked_ips)
+        for ip in sorted(blocked_ips):
+            self.btree.insert("", "end", values=(tr("ip_type"), ip, "-"))
+        # Get blocked MACs
+        blocked_macs = set()
+        if hasattr(self.engine, "_ips") and hasattr(self.engine._ips, "blocked_macs"):
+            blocked_macs.update(self.engine._ips.blocked_macs)
+        for mac in sorted(blocked_macs):
+            self.btree.insert("", "end", values=(tr("mac_type"), mac, "-"))
+
+    def _unblock_selected(self):
+        selected = self.btree.selection()
+        if not selected:
+            return
+        for iid in selected:
+            type_, target, _ = self.btree.item(iid)["values"]
+            if type_ == tr("ip_type"):
+                self.engine.unblock_ip(target)
+                if hasattr(self.engine, "_ips") and hasattr(self.engine._ips, "unblock_target"):
+                    self.engine._ips.unblock_target(target)
+            elif type_ == tr("mac_type"):
+                if hasattr(self.engine, "_ips") and hasattr(self.engine._ips, "unblock_target"):
+                    self.engine._ips.unblock_target(target)
+        self._refresh_blocks()
 
     def _tick(self):
-        counts = {"critical":0,"high":0,"medium":0,"low":0}
-        for a in self.engine.alerts:
-            sev = a.get("severity","low").lower(); counts[sev] = counts.get(sev,0)+1
-        for sev,card in self.sev_cards.items(): card.set(str(counts.get(sev,0)))
-        # Also refresh blocked IPs list!
-        self._refresh_blocked()
-        self.after(2000,self._tick)
+        self._refresh_blocks()
+        self.after(2000, self._tick)
+
+    def refresh_ui(self):
+        try:
+            # Rebuild the page to update all labels
+            for widget in self.winfo_children():
+                widget.destroy()
+            self._build()
+        except Exception:
+            logging.exception('ActiveBlocksPage refresh_ui failed')
 
 class WebAccessPage(ctk.CTkFrame):
     def __init__(self, master, engine, app_ref, **kw):
@@ -2421,7 +2695,8 @@ class SettingsPage(ctk.CTkFrame):
         self._tg_token = ctk.CTkEntry(tg_r1, width=340, font=FONT_MONO,
                                        fg_color=T["bg_card"], border_color=T["border"],
                                        text_color=T["text_primary"], corner_radius=8,
-                                       placeholder_text=tr("bot_token_placeholder"))
+                                       placeholder_text=tr("bot_token_placeholder"),
+                                       show="•")
         self._tg_token.insert(0, CFG.get("tg_token", ""))
         self._tg_token.pack(side="left", padx=8)
 
@@ -2561,6 +2836,87 @@ class SettingsPage(ctk.CTkFrame):
                                        text_color=T["text_primary"], corner_radius=8)
         self._max_rows.insert(0,str(CFG.get("max_table_rows",200)))
         self._max_rows.pack(side="left",padx=10)
+
+        self._section(scroll, tr('notifications'))
+        notif_card = ctk.CTkFrame(scroll, fg_color=T["bg_card"], corner_radius=12)
+        notif_card.pack(fill="x", padx=24, pady=(0,12))
+        
+        # Email Settings
+        ctk.CTkLabel(notif_card, text=tr('email'), font=FONT_SMALL,
+                     text_color=T["accent"], fg_color=T["bg_deep"], corner_radius=8, width=150).pack(anchor="w", padx=16, pady=(8,4))
+        for label, key, placeholder in [
+            (tr('email_server'), "email_server", "smtp.gmail.com"),
+            (tr('email_port'), "email_port", "587"),
+            (tr('email_recipient'), "email_recipient", "user@example.com"),
+        ]:
+            r = ctk.CTkFrame(notif_card, fg_color="transparent"); r.pack(fill="x", padx=16, pady=2)
+            ctk.CTkLabel(r, text=label, font=FONT_SMALL, text_color=T["text_dim"], width=150).pack(side="left")
+            entry = ctk.CTkEntry(r, width=300, font=FONT_MONO, fg_color=T["bg_card"], border_color=T["border"], text_color=T["text_primary"], corner_radius=8, placeholder_text=placeholder)
+            entry.insert(0, str(CFG.get(key, "")))
+            entry.pack(side="left", padx=8)
+            setattr(self, f"_notif_{key}", entry)
+        # Email user and password
+        r = ctk.CTkFrame(notif_card, fg_color="transparent"); r.pack(fill="x", padx=16, pady=2)
+        ctk.CTkLabel(r, text=tr('email_user'), font=FONT_SMALL, text_color=T["text_dim"], width=150).pack(side="left")
+        self._notif_email_user = ctk.CTkEntry(r, width=300, font=FONT_MONO, fg_color=T["bg_card"], border_color=T["border"], text_color=T["text_primary"], corner_radius=8, placeholder_text="user@gmail.com")
+        self._notif_email_user.insert(0, str(CFG.get("email_user", "")))
+        self._notif_email_user.pack(side="left", padx=8)
+        r = ctk.CTkFrame(notif_card, fg_color="transparent"); r.pack(fill="x", padx=16, pady=(2,8))
+        ctk.CTkLabel(r, text=tr('email_password'), font=FONT_SMALL, text_color=T["text_dim"], width=150).pack(side="left")
+        self._notif_email_password = ctk.CTkEntry(r, width=300, font=FONT_MONO, fg_color=T["bg_card"], border_color=T["border"], text_color=T["text_primary"], corner_radius=8, placeholder_text="app password", show="•")
+        self._notif_email_password.insert(0, str(CFG.get("email_password", "")))
+        self._notif_email_password.pack(side="left", padx=8)
+
+        # Discord and Slack
+        ctk.CTkLabel(notif_card, text=tr('discord'), font=FONT_SMALL,
+                     text_color=T["accent"], fg_color=T["bg_deep"], corner_radius=8, width=150).pack(anchor="w", padx=16, pady=(8,4))
+        r = ctk.CTkFrame(notif_card, fg_color="transparent"); r.pack(fill="x", padx=16, pady=2)
+        ctk.CTkLabel(r, text=tr('discord_webhook'), font=FONT_SMALL, text_color=T["text_dim"], width=150).pack(side="left")
+        self._notif_discord_webhook = ctk.CTkEntry(r, width=400, font=FONT_MONO, fg_color=T["bg_card"], border_color=T["border"], text_color=T["text_primary"], corner_radius=8, placeholder_text="https://discord.com/api/webhooks/...")
+        self._notif_discord_webhook.insert(0, str(CFG.get("discord_webhook", "")))
+        self._notif_discord_webhook.pack(side="left", padx=8)
+        ctk.CTkLabel(notif_card, text=tr('slack'), font=FONT_SMALL,
+                     text_color=T["accent"], fg_color=T["bg_deep"], corner_radius=8, width=150).pack(anchor="w", padx=16, pady=(8,4))
+        r = ctk.CTkFrame(notif_card, fg_color="transparent"); r.pack(fill="x", padx=16, pady=(2,8))
+        ctk.CTkLabel(r, text=tr('slack_webhook'), font=FONT_SMALL, text_color=T["text_dim"], width=150).pack(side="left")
+        self._notif_slack_webhook = ctk.CTkEntry(r, width=400, font=FONT_MONO, fg_color=T["bg_card"], border_color=T["border"], text_color=T["text_primary"], corner_radius=8, placeholder_text="https://hooks.slack.com/services/...")
+        self._notif_slack_webhook.insert(0, str(CFG.get("slack_webhook", "")))
+        self._notif_slack_webhook.pack(side="left", padx=8)
+
+        # System Toasts
+        self._notif_system_toasts = tk.BooleanVar(value=CFG.get("system_toasts", False))
+        ctk.CTkSwitch(notif_card, text=tr('system_toasts'), variable=self._notif_system_toasts,
+                      font=FONT_BODY, text_color=T["text_primary"], progress_color=T["accent"]).pack(anchor="w", padx=16, pady=(0,12))
+
+        self._section(scroll, tr('integrations'))
+        int_card = ctk.CTkFrame(scroll, fg_color=T["bg_card"], corner_radius=12)
+        int_card.pack(fill="x", padx=24, pady=(0,12))
+        for label, key, placeholder in [
+            (tr('virustotal_api'), "virustotal_api", "your_api_key_here"),
+            (tr('abuseipdb_api'), "abuseipdb_api", "your_api_key_here"),
+        ]:
+            r = ctk.CTkFrame(int_card, fg_color="transparent"); r.pack(fill="x", padx=16, pady=8)
+            ctk.CTkLabel(r, text=label, font=FONT_SMALL, text_color=T["text_dim"], width=150).pack(side="left")
+            entry = ctk.CTkEntry(r, width=400, font=FONT_MONO, fg_color=T["bg_card"], border_color=T["border"], text_color=T["text_primary"], corner_radius=8, placeholder_text=placeholder, show="•")
+            entry.insert(0, str(CFG.get(key, "")))
+            entry.pack(side="left", padx=8)
+            setattr(self, f"_int_{key}", entry)
+
+        self._section(scroll, tr('export_config'))
+        cfg_card = ctk.CTkFrame(scroll, fg_color=T["bg_card"], corner_radius=12)
+        cfg_card.pack(fill="x", padx=24, pady=(0,12))
+        r = ctk.CTkFrame(cfg_card, fg_color="transparent"); r.pack(fill="x", padx=16, pady=12)
+        ctk.CTkButton(r, text=tr('export_config'), width=140, fg_color=T["accent"], text_color=T["bg_deep"],
+                      font=FONT_SMALL, corner_radius=DEFAULT_CORNER, command=self._export_cfg).pack(side="left", padx=4)
+        ctk.CTkButton(r, text=tr('import_config'), width=140, fg_color=T["safe"], text_color=T["bg_deep"],
+                      font=FONT_SMALL, corner_radius=DEFAULT_CORNER, command=self._import_cfg).pack(side="left", padx=4)
+        self._auto_backup = tk.BooleanVar(value=CFG.get("auto_backup", False))
+        ctk.CTkSwitch(r, text=tr('auto_backup'), variable=self._auto_backup,
+                      font=FONT_BODY, text_color=T["text_primary"], progress_color=T["accent"]).pack(side="left", padx=12)
+        ctk.CTkLabel(r, text=tr('backup_interval')+":", font=FONT_SMALL, text_color=T["text_dim"]).pack(side="left", padx=8)
+        self._backup_interval = ctk.CTkEntry(r, width=80, font=FONT_MONO, fg_color=T["bg_card"], border_color=T["border"], text_color=T["text_primary"], corner_radius=8)
+        self._backup_interval.insert(0, str(CFG.get("backup_interval", 24)))
+        self._backup_interval.pack(side="left", padx=4)
 
         ctk.CTkButton(scroll, text=tr("save_all"), width=220,
                       fg_color=T["safe"], text_color=T["bg_deep"], font=FONT_HEADER,
@@ -2719,6 +3075,25 @@ class SettingsPage(ctk.CTkFrame):
         except ValueError: pass
         CFG["tg_token"]   = self._tg_token.get().strip()
         CFG["tg_chat_id"] = self._tg_chat.get().strip()
+        
+        # Save new notification settings
+        CFG["email_server"] = getattr(self, '_notif_email_server', ctk.CTkEntry).get().strip() if hasattr(self, '_notif_email_server') else ""
+        CFG["email_port"] = getattr(self, '_notif_email_port', ctk.CTkEntry).get().strip() if hasattr(self, '_notif_email_port') else ""
+        CFG["email_user"] = getattr(self, '_notif_email_user', ctk.CTkEntry).get().strip() if hasattr(self, '_notif_email_user') else ""
+        CFG["email_password"] = getattr(self, '_notif_email_password', ctk.CTkEntry).get().strip() if hasattr(self, '_notif_email_password') else ""
+        CFG["email_recipient"] = getattr(self, '_notif_email_recipient', ctk.CTkEntry).get().strip() if hasattr(self, '_notif_email_recipient') else ""
+        CFG["discord_webhook"] = self._notif_discord_webhook.get().strip() if hasattr(self, '_notif_discord_webhook') else ""
+        CFG["slack_webhook"] = self._notif_slack_webhook.get().strip() if hasattr(self, '_notif_slack_webhook') else ""
+        CFG["system_toasts"] = self._notif_system_toasts.get() if hasattr(self, '_notif_system_toasts') else False
+        
+        # Save integration settings
+        CFG["virustotal_api"] = self._int_virustotal_api.get().strip() if hasattr(self, '_int_virustotal_api') else ""
+        CFG["abuseipdb_api"] = self._int_abuseipdb_api.get().strip() if hasattr(self, '_int_abuseipdb_api') else ""
+        
+        # Save config/backup settings
+        CFG["auto_backup"] = self._auto_backup.get() if hasattr(self, '_auto_backup') else False
+        CFG["backup_interval"] = self._backup_interval.get().strip() if hasattr(self, '_backup_interval') else "24"
+        
         save_config(CFG)
         try:
             self.engine.reload_telegram()
@@ -2726,6 +3101,33 @@ class SettingsPage(ctk.CTkFrame):
             pass
         self.engine.reload_sigs()
         self._status.configure(text=f"  {tr('saved_restart')}")
+
+    def _export_cfg(self):
+        try:
+            path = filedialog.asksaveasfilename(
+                defaultextension=".json",
+                filetypes=[("JSON", "*.json"), ("All", "*.*")],
+            )
+            if not path: return
+            import shutil
+            shutil.copyfile(CONFIG_FILE, path)
+            messagebox.showinfo(tr("export"), f"Config saved to {path}")
+        except Exception as e:
+            logging.exception("Failed to export config")
+
+    def _import_cfg(self):
+        try:
+            path = filedialog.askopenfilename(
+                filetypes=[("JSON", "*.json"), ("All", "*.*")],
+            )
+            if not path: return
+            import shutil
+            shutil.copyfile(path, CONFIG_FILE)
+            global CFG
+            CFG = load_config()
+            messagebox.showinfo(tr("save"), "Config imported successfully. Please restart the app.")
+        except Exception as e:
+            logging.exception("Failed to import config")
 
     def _add_simulate_button(self, parent):
         try:
@@ -2956,6 +3358,7 @@ class SOCSentinel(ctk.CTk):
             ("dash",     "","dash"),
             ("analyzer", "","analyzer"),
             ("threats",  "","threats"),
+            ("active_blocks", "","active_blocks"),
             ("web",      "","web"),
             ("topology", "","topology"),
             ("logs",     "","logs"),
@@ -3013,13 +3416,14 @@ class SOCSentinel(ctk.CTk):
         self._ai_btn.pack(side="left")
 
         self.pages = {
-            "dash":     DashboardPage(self.content, self.engine),
-            "analyzer": AnalyzerPage(self.content, self.engine),
-            "threats":  ThreatPage(self.content, self.engine),
-            "web":      WebAccessPage(self.content, self.engine, self),
-            "topology": TopologyPage(self.content, self.engine),
-            "logs":     LogsPage(self.content, self.engine),
-            "settings": SettingsPage(self.content, self.engine, self, self._current_user),
+            "dash":         DashboardPage(self.content, self.engine),
+            "analyzer":     AnalyzerPage(self.content, self.engine),
+            "threats":      ThreatPage(self.content, self.engine),
+            "active_blocks": ActiveBlocksPage(self.content, self.engine),
+            "web":          WebAccessPage(self.content, self.engine, self),
+            "topology":     TopologyPage(self.content, self.engine),
+            "logs":         LogsPage(self.content, self.engine),
+            "settings":     SettingsPage(self.content, self.engine, self, self._current_user),
         }
         for p in self.pages.values():
             p.grid(row=0, column=0, sticky="nsew")

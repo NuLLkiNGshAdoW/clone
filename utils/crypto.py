@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-KEY_FILE = Path(".sentinel_key")
+KEY_FILE = Path("sentinel_key.key")
 
 
 def _get_fernet():
@@ -17,6 +17,10 @@ def _get_fernet():
         return None
     if not KEY_FILE.exists():
         KEY_FILE.write_bytes(Fernet.generate_key())
+        try:
+            KEY_FILE.chmod(0o600)
+        except Exception:
+            pass
     return Fernet(KEY_FILE.read_bytes().strip())
 
 
@@ -28,6 +32,11 @@ def encrypt_json(path: Path, data: dict) -> bool:
         return False
     enc = path.with_suffix(path.suffix + ".enc")
     enc.write_bytes(f.encrypt(json.dumps(data, indent=2).encode()))
+    try:
+        if path.exists():
+            path.unlink()
+    except Exception:
+        pass
     return True
 
 
