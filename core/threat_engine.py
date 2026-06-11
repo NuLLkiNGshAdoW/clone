@@ -878,11 +878,12 @@ class ThreatEngine:
                             self.alerts.append(alert_rec)
                             if len(self.alerts) > 2000:
                                 self.alerts = self.alerts[-1000:]
-                            for cb in self.alert_callbacks:
-                                try:
-                                    cb(alert_rec)
-                                except Exception:
-                                    pass
+                            alert_callbacks = list(self.alert_callbacks)
+                        for cb in alert_callbacks:
+                            try:
+                                cb(alert_rec)
+                            except Exception:
+                                pass
                         try:
                             db = get_db()
                             if db:
@@ -890,11 +891,12 @@ class ThreatEngine:
                         except Exception:
                             pass
                         with self.lock:
-                            for cb in self._packet_callbacks:
-                                try:
-                                    cb(fake_pkt_data)
-                                except Exception:
-                                    pass
+                            packet_callbacks = list(self._packet_callbacks)
+                        for cb in packet_callbacks:
+                            try:
+                                cb(fake_pkt_data)
+                            except Exception:
+                                pass
                         display_item = dict(item)
                         display_item["_display_only"] = True
                         try:

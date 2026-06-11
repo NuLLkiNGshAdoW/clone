@@ -3647,34 +3647,39 @@ class SOCSentinel(ctk.CTk):
             command=self._toggle_ai)
         self._ai_btn.pack(side="left")
 
-        logging.info("[SOCSentinel] creating pages")
+        logging.info("[SOCSentinel] registering page builders")
+        self.pages = {}
+        self._page_builders = {
+            "dash":         lambda: DashboardPage(self.content, self.engine),
+            "analyzer":     lambda: AnalyzerPage(self.content, self.engine),
+            "threats":      lambda: ThreatPage(self.content, self.engine),
+            "active_blocks": lambda: ActiveBlocksPage(self.content, self.engine),
+            "web":          lambda: WebAccessPage(self.content, self.engine, self),
+            "topology":     lambda: TopologyPage(self.content, self.engine),
+            "logs":         lambda: LogsPage(self.content, self.engine),
+            "settings":     lambda: SettingsPage(self.content, self.engine, self, self._current_user),
+        }
+        logging.info("[SOCSentinel] creating initial pages")
         try:
-            self.pages = {
-                "dash":         DashboardPage(self.content, self.engine),
-                "analyzer":     AnalyzerPage(self.content, self.engine),
-                "threats":      ThreatPage(self.content, self.engine),
-                "active_blocks": ActiveBlocksPage(self.content, self.engine),
-                "web":          WebAccessPage(self.content, self.engine, self),
-                "topology":     TopologyPage(self.content, self.engine),
-                "logs":         LogsPage(self.content, self.engine),
-                "settings":     SettingsPage(self.content, self.engine, self, self._current_user),
-            }
+            self._create_page("dash")
+            self._create_page("logs")
         except Exception:
-            logging.exception("[SOCSentinel] Failed while creating pages")
+            logging.exception("[SOCSentinel] Failed while creating initial pages")
             raise
-        logging.info("[SOCSentinel] pages created")
-        for p in self.pages.values():
-            p.grid(row=0, column=0, sticky="nsew")
+        logging.info("[SOCSentinel] initial pages created")
         self.show_page("dash")
         logging.info("[SOCSentinel] show_page(dash) complete")
 
-        try:
-            self.pages["settings"]._add_simulate_button(self.pages["settings"])
-        except Exception: pass
+        if "settings" in self.pages:
+            try:
+                self.pages["settings"]._add_simulate_button(self.pages["settings"])
+            except Exception:
+                pass
 
         try:
             CFG["demo_mode"] = False
-        except Exception: pass
+        except Exception:
+            pass
 
         self.after(200, lambda: [self._sidebar_btn.lift(), self._ai_btn.lift()])
         def _safe_lift(e=None):
@@ -3712,6 +3717,36 @@ class SOCSentinel(ctk.CTk):
             self._ai_fab.lift()
         except Exception:
             logging.exception("Failed to create AI floating button")
+
+    def _create_page(self, name):
+        if name in self.pages:
+            return self.pages[name]
+        builder = self._page_builders.get(name)
+        if builder is None:
+            raise KeyError(f"Unknown page: {name}")
+        logging.info("[SOCSentinel] Creating page %s", name)
+        page = builder()
+        page.grid(row=0, column=0, sticky="nsew")
+        self.pages[name] = page
+        return page
+
+    def show_page(self, name):
+        if name not in self.pages:
+            if name in getattr(self, '_page_builders', {}):
+                self._create_page(name)
+            else:
+                logging.warning("[SOCSentinel] show_page called for unknown page %s", name)
+                return
+        for pid,btn in self._nav_btns.items():
+            btn.configure(fg_color=T["bg_hover"] if pid==name else "transparent",
+                          text_color=T["accent"]  if pid==name else T["text_dim"])
+        for p in self.pages.values():
+            p.grid_remove()
+        self.pages[name].grid(row=0, column=0, sticky="nsew")
+        try: self._current_page = name
+        except Exception: pass
+        try: self._sidebar_btn.lift(); self._ai_btn.lift()
+        except Exception: pass
 
     def _start_flask_api(self):
         if not FLASK_AVAILABLE:
@@ -3777,17 +3812,6 @@ class SOCSentinel(ctk.CTk):
             text_color=T["text_dim"], font=(FONT_FAMILY_SANS_BOLD,11),
             corner_radius=DEFAULT_CORNER, command=lambda p=pid: self.show_page(p))
         btn.pack(fill="x", padx=10, pady=2); self._nav_btns[pid] = btn
-
-    def show_page(self, name):
-        for pid,btn in self._nav_btns.items():
-            btn.configure(fg_color=T["bg_hover"] if pid==name else "transparent",
-                          text_color=T["accent"]  if pid==name else T["text_dim"])
-        for p in self.pages.values(): p.grid_remove()
-        self.pages[name].grid(row=0, column=0, sticky="nsew")
-        try: self._current_page = name
-        except Exception: pass
-        try: self._sidebar_btn.lift(); self._ai_btn.lift()
-        except Exception: pass
 
     def apply_language(self, lang: str):
         try:
