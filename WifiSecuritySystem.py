@@ -4029,9 +4029,8 @@ class SOCSentinel(ctk.CTk):
                     self.engine.submit(pkt)
                 return
 
-            pkt_type: str = type(pkt.payload).__name__
-            if pkt_type in self._MGMT_LIMITED_TYPES:
-                src_mac: str = pkt.addr2 or "ff:ff:ff:ff:ff:ff"
+            if pkt.haslayer(scapy.Dot11Deauth) or pkt.haslayer(scapy.Dot11Disas):
+                src_mac: str = pkt[scapy.Dot11].addr2 or "ff:ff:ff:ff:ff:ff"
                 with self._agg_lock:
                     self._agg_deauth_counts[src_mac] = (
                         self._agg_deauth_counts.get(src_mac, 0) + 1
