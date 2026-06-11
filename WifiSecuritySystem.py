@@ -8,8 +8,14 @@ import matplotlib.pyplot as plt
 import sys as _sys
 if _sys.platform == "win32":
     matplotlib.rcParams["font.family"] = ["Segoe UI", "Segoe UI Emoji", "DejaVu Sans"]
+    FONT_FAMILY_SANS = "Segoe UI"
+    FONT_FAMILY_SANS_BOLD = "Segoe UI Semibold"
+    FONT_FAMILY_MONO = "Consolas"
 else:
     matplotlib.rcParams["font.family"] = ["DejaVu Sans"]
+    FONT_FAMILY_SANS = "DejaVu Sans"
+    FONT_FAMILY_SANS_BOLD = "DejaVu Sans"
+    FONT_FAMILY_MONO = "DejaVu Sans Mono"
 
 import logging as _mpl_log
 _mpl_log.getLogger("matplotlib.font_manager").setLevel(_mpl_log.ERROR)
@@ -352,9 +358,10 @@ def _build_flask_app(engine_ref, app_ref=None) -> "Flask":
 
     return flask_app
 
-CONFIG_FILE = Path("sentinel_config.json")
-USERS_FILE  = Path("sentinel_users.json")
-LOG_DIR     = Path("sentinel_logs")
+ROOT_DIR    = Path(__file__).resolve().parent
+CONFIG_FILE = ROOT_DIR / "sentinel_config.json"
+USERS_FILE  = ROOT_DIR / "sentinel_users.json"
+LOG_DIR     = ROOT_DIR / "sentinel_logs"
 LOG_DIR.mkdir(exist_ok=True)
 
 DEFAULT_CONFIG = {
@@ -422,31 +429,61 @@ def _get_key():
 def load_config():
     global _ENCRYPTION_KEY
     config_enc_path = CONFIG_FILE.with_suffix(CONFIG_FILE.suffix + ".enc")
-    if CONFIG_FILE.exists() or config_enc_path.exists():
+    cfg = None
+
+    if CONFIG_FILE.exists():
         try:
-            if config_enc_path.exists():
-                cfg = load_json_encrypted(CONFIG_FILE, DEFAULT_CONFIG)
-            else:
-                with open(CONFIG_FILE, encoding="utf-8") as f:
-                    cfg = json.load(f)
-            for k, v in DEFAULT_CONFIG.items():
-                cfg.setdefault(k, v)
-            cfg = decrypt_config_values(cfg, _get_key())
-            return cfg
+            with open(CONFIG_FILE, encoding="utf-8") as f:
+                cfg = json.load(f)
         except Exception:
-            logging.exception("Error loading config file")
-    return dict(DEFAULT_CONFIG)
+            cfg = None
+
+    if cfg is None and config_enc_path.exists():
+        try:
+            cfg = load_json_encrypted(CONFIG_FILE, DEFAULT_CONFIG)
+        except Exception:
+            logging.exception("Error loading encrypted config file")
+            cfg = None
+
+    if cfg is None:
+        cfg = dict(DEFAULT_CONFIG)
+
+    for k, v in DEFAULT_CONFIG.items():
+        cfg.setdefault(k, v)
+
+    try:
+        cfg = decrypt_config_values(cfg, _get_key())
+    except Exception:
+        logging.exception("Error decrypting config values")
+
+    return cfg
+
 
 def save_config(cfg):
-    cfg_encrypted = encrypt_config_values(dict(cfg), _get_key())
-    if cfg_encrypted.get("encrypt_config"):
-        try:
-            if encrypt_json(CONFIG_FILE, cfg_encrypted):
+    cfg_to_save = dict(cfg)
+    config_enc_path = CONFIG_FILE.with_suffix(CONFIG_FILE.suffix + ".enc")
+    try:
+        if cfg_to_save.get("encrypt_config"):
+            cfg_to_save = encrypt_config_values(cfg_to_save, _get_key())
+        else:
+            cfg_to_save = decrypt_config_values(cfg_to_save, _get_key())
+    except Exception:
+        logging.exception("Failed to prepare config values for saving")
+
+    try:
+        if cfg_to_save.get("encrypt_config"):
+            if encrypt_json(CONFIG_FILE, cfg_to_save):
                 return
-        except Exception:
-            logging.exception("Failed to save encrypted config")
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg_encrypted, f, indent=2)
+        else:
+            if config_enc_path.exists():
+                try:
+                    config_enc_path.unlink()
+                except Exception:
+                    pass
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg_to_save, f, indent=2)
+    except Exception:
+        logging.exception("Failed to save config file")
 
 CFG   = load_config()
 USERS = load_users()
@@ -478,11 +515,11 @@ def build_theme(theme="dark", accent_name="cyan"):
 T = build_theme(CFG["theme"], CFG["accent"])
 DEFAULT_CORNER = 12
 
-FONT_HEADER = ("Segoe UI Semibold", 13)
-FONT_BODY   = ("Inter", 11)
-FONT_MONO   = ("Consolas", 10)
-FONT_SMALL  = ("Inter", 9)
-FONT_TINY   = ("Inter", 8)
+FONT_HEADER = (FONT_FAMILY_SANS_BOLD, 13)
+FONT_BODY   = (FONT_FAMILY_SANS, 11)
+FONT_MONO   = (FONT_FAMILY_MONO, 10)
+FONT_SMALL  = (FONT_FAMILY_SANS, 9)
+FONT_TINY   = (FONT_FAMILY_SANS, 8)
 
 def _adjust_color(hexcol: str, factor: float) -> str:
     hexcol = hexcol.lstrip('#')
@@ -522,11 +559,8 @@ def get_signatures():
     }
 
 def set_dpi_awareness():
-    if sys.platform != "win32": return
-    try: ctypes.windll.shcore.SetProcessDpiAwareness(2)
-    except Exception:
-        try: ctypes.windll.user32.SetProcessDPIAware()
-        except Exception: pass
+    # Linux/macOS: no special DPI setup required here.
+    return
 
 def ttk_style():
     s = ttk.Style(); s.theme_use("default")
@@ -534,7 +568,7 @@ def ttk_style():
         s.configure(name, background=T["bg_panel"], foreground=T["text_primary"],
             rowheight=24, fieldbackground=T["bg_panel"], borderwidth=0, font=FONT_MONO)
         s.configure(f"{name}.Heading", background=T["bg_card"], foreground=T["accent"],
-            font=("Segoe UI Semibold", 10, "bold"), relief="flat")
+            font=(FONT_FAMILY_SANS_BOLD, 10, "bold"), relief="flat")
         s.map(name, background=[("selected", T["bg_hover"])],
               foreground=[("selected", T["accent"])])
 
@@ -621,14 +655,14 @@ class KPICard(ctk.CTkFrame):
         inner = ctk.CTkFrame(self, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=16, pady=12)
         top = ctk.CTkFrame(inner, fg_color="transparent"); top.pack(fill="x")
-        self._icon_label = ctk.CTkLabel(top, text=icon, font=("Consolas",20), text_color=color)
+        self._icon_label = ctk.CTkLabel(top, text=icon, font=(FONT_FAMILY_MONO,20), text_color=color)
         self._icon_label.pack(side="left")
         self._title_raw = title
         self._title_label = ctk.CTkLabel(top, text=f"  {title}", font=FONT_TINY,
                                          text_color=T["text_dim"])
         self._title_label.pack(side="left")
         self._val = ctk.CTkLabel(inner, text=str(value),
-                                  font=("Consolas",30,"bold"), text_color=color)
+                                  font=(FONT_FAMILY_MONO,30,"bold"), text_color=color)
         self._val.pack(anchor="w", pady=(4,0))
         if subtitle:
             self._sub_raw = subtitle
@@ -676,7 +710,13 @@ class KPICard(ctk.CTkFrame):
                     self._sub.configure(text=new_sub)
                 else:
                     self._sub.configure(text=self._sub_raw)
-        except Exception:
+        except Exception as e:
+            # Suppress TclError when widget is destroyed during UI rebuild
+            try:
+                if isinstance(e, tk.TclError):
+                    return
+            except Exception:
+                pass
             logging.exception("KPICard refresh_ui failed")
 
 def section_label(parent, text, sub=""):
@@ -729,9 +769,9 @@ class AuthWindow(ctk.CTkToplevel):
     def _build(self):
         hdr = ctk.CTkFrame(self, fg_color=T["bg_panel"], corner_radius=DEFAULT_CORNER, height=90, border_width=1, border_color=T["border"])
         hdr.pack(fill="x"); hdr.pack_propagate(False)
-        ctk.CTkLabel(hdr, text="", font=("Segoe UI Semibold",38),
+        ctk.CTkLabel(hdr, text="", font=(FONT_FAMILY_SANS_BOLD,38),
                      text_color=T["accent"]).pack(pady=(10,0))
-        ctk.CTkLabel(hdr, text="SOC SENTINEL", font=("Segoe UI Semibold",13),
+        ctk.CTkLabel(hdr, text="SOC SENTINEL", font=(FONT_FAMILY_SANS_BOLD,13),
                      text_color=T["text_primary"]).pack()
         tab = ctk.CTkFrame(self, fg_color=T["bg_card"], corner_radius=10)
         tab.pack(padx=30, pady=(20,0), fill="x")
@@ -787,8 +827,10 @@ class AuthWindow(ctk.CTkToplevel):
             except Exception: pass
             try: self._status.configure(text='')
             except Exception: pass
-        except Exception:
-            logging.exception('AuthWindow refresh_ui failed')
+        except Exception as e:
+            # Suppress TclError when widget is destroyed during UI rebuild
+            if "_tkinter.TclError" not in str(type(e).__name__):
+                logging.exception('AuthWindow refresh_ui failed')
 
     def _submit(self):
         mode = self._mode.get()
@@ -894,7 +936,7 @@ class AIAssistantPanel(ctk.CTkFrame):
 
         self.chat_box = ctk.CTkTextbox(self, fg_color=T["bg_deep"],
                                         text_color=T["text_primary"],
-                                        font=("Inter",11), wrap="word",
+                                        font=FONT_BODY, wrap="word",
                                         activate_scrollbars=True)
         try: self.chat_box.tag_configure("ai", spacing3=6)
         except Exception: pass
@@ -920,7 +962,7 @@ class AIAssistantPanel(ctk.CTkFrame):
         ctk.CTkButton(inp, text=tr("send"), width=40, height=36,
                       fg_color=_adjust_color(T["accent"],0.95), hover_color=_adjust_color(T["accent"],1.2),
                       text_color=T["bg_deep"], corner_radius=DEFAULT_CORNER,
-                      font=("Segoe UI Semibold",14), command=self._send
+                      font=(FONT_FAMILY_SANS_BOLD,14), command=self._send
                       ).pack(side="right", padx=(0,8), pady=8)
         ctk.CTkButton(inp, text=tr("clear_chat"), width=36, height=36,
                       fg_color=T["bg_card"], hover_color=_adjust_color(T["bg_card"],1.05), text_color=T["text_dim"],
@@ -965,7 +1007,7 @@ class AIAssistantPanel(ctk.CTkFrame):
         self.after(10000, self._chips_tick)
 
     def _switch_provider(self, name):
-        self._provider.set(name); CFG["ai_provider"] = name; save_config(CFG)
+        self._provider.set(name); CFG["ai_provider"] = name
         for n, btn in self._prov_btns.items():
             info = self.PROVIDERS[n]; active = (n == name)
             btn.configure(fg_color=info["color"] if active else T["bg_card"],
@@ -983,7 +1025,7 @@ class AIAssistantPanel(ctk.CTkFrame):
                                     fg_color=info.get("color", T["accent"]))
 
     def _save_key(self, provider_name, cfg_key, entry):
-        key = entry.get().strip(); CFG[cfg_key] = key; save_config(CFG)
+        key = entry.get().strip(); CFG[cfg_key] = key
         self._append_msg("system", f" {provider_name} API key saved.")
 
     def _build_prompt(self, user_text: str) -> str:
@@ -1109,9 +1151,39 @@ TASK: {instruction}
         model = self.PROVIDERS["Gemini"]["model"]
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         req = urllib.request.Request(url, data=payload,
-            headers={"Content-Type":"application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = _json.loads(resp.read())
+            headers={"Content-Type":"application/json", "User-Agent":"SOC-Sentinel/1.0"}, method="POST")
+        # Retry transient errors (503, 429) with exponential backoff
+        import urllib.error as _uerr, time as _time, logging as _log
+        max_attempts = 3
+        backoff = 1.0
+        last_exc = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = _json.loads(resp.read())
+                last_exc = None
+                break
+            except Exception as e:
+                last_exc = e
+                if isinstance(e, _uerr.HTTPError):
+                    try:
+                        body = e.read().decode(errors="ignore")
+                    except Exception:
+                        body = "<failed to read body>"
+                    _log.error("Gemini HTTPError (attempt %s/%s): code=%s reason=%s body=%s", attempt, max_attempts, getattr(e, 'code', ''), getattr(e, 'reason', ''), body)
+                    # Retry on 503 Service Unavailable or 429 Too Many Requests
+                    if getattr(e, 'code', None) in (429, 503) and attempt < max_attempts:
+                        _time.sleep(backoff)
+                        backoff *= 2
+                        continue
+                    raise
+                else:
+                    _log.exception("Gemini request failed (attempt %s/%s)", attempt, max_attempts)
+                    if attempt < max_attempts:
+                        _time.sleep(backoff)
+                        backoff *= 2
+                        continue
+                    raise
         return (data.get("candidates",[{}])[0].get("content",{})
                     .get("parts",[{}])[0].get("text",""))
 
@@ -2126,11 +2198,19 @@ class ActiveBlocksPage(ctk.CTkFrame):
     def refresh_ui(self):
         try:
             # Rebuild the page to update all labels
-            for widget in self.winfo_children():
-                widget.destroy()
-            self._build()
-        except Exception:
-            logging.exception('ActiveBlocksPage refresh_ui failed')
+            try:
+                children = self.winfo_children()
+            except Exception:
+                children = []
+            for widget in children:
+                try: widget.destroy()
+                except Exception: pass
+            try: self._build()
+            except Exception: pass
+        except Exception as e:
+            # Suppress TclError when widget is destroyed during UI rebuild
+            if "_tkinter.TclError" not in str(type(e).__name__):
+                logging.exception('ActiveBlocksPage refresh_ui failed')
 
 class WebAccessPage(ctk.CTkFrame):
     def __init__(self, master, engine, app_ref, **kw):
@@ -2152,7 +2232,7 @@ class WebAccessPage(ctk.CTkFrame):
         ctk.CTkLabel(hdr, text=tr("web_dashboard_desc"),
                      font=FONT_SMALL, text_color=T["text_dim"]).pack(pady=(0, 12))
         self._url_box = ctk.CTkTextbox(hdr, height=80, fg_color=T["bg_card"],
-                                        text_color=T["safe"], font=("Consolas", 14))
+                                        text_color=T["safe"], font=(FONT_FAMILY_MONO, 14))
         self._url_box.pack(fill="x", padx=16, pady=(0, 8))
         brow = ctk.CTkFrame(hdr, fg_color="transparent")
         brow.pack(fill="x", padx=16, pady=(0, 16))
@@ -2248,8 +2328,8 @@ class WebAccessPage(ctk.CTkFrame):
             CFG["web_autostart"] = self._autostart_var.get()
             CFG["web_log_requests"] = self._log_requests_var.get()
             self._kpi_port.set(str(port))
-            save_config(CFG)
-            self._log_message("Settings saved")
+            # Apply dynamically (do not persist to disk until Save All)
+            self._log_message("Settings applied (not saved to disk). Use Save All to persist.")
         except Exception as e:
             self._log_message(f"Error saving settings: {e}")
 
@@ -2281,7 +2361,7 @@ class WebAccessPage(ctk.CTkFrame):
         import subprocess
         import sys
         import os
-        config_path = Path("sentinel_config.json").resolve()
+        config_path = ROOT_DIR / "sentinel_config.json"
         try:
             if sys.platform == "win32":
                 os.startfile(config_path)
@@ -2433,7 +2513,12 @@ class TopologyPage(ctk.CTkFrame):
                 self.ax.scatter([x],[y],s=220,color=c,zorder=4,alpha=0.9)
                 self.ax.text(x,y-0.06,ip,ha="center",color=c,fontsize=7)
             self.fig.canvas.draw_idle()
-        for i in self.htree.get_children(): self.htree.delete(i)
+        try:
+            for i in self.htree.get_children():
+                try: self.htree.delete(i)
+                except Exception: pass
+        except Exception:
+            pass
         now = datetime.now()
         try:
             if self.engine.lock.acquire(timeout=0.05):
@@ -2508,11 +2593,15 @@ class TopologyPage(ctk.CTkFrame):
         self._host_cache[ip] = hn
         try:
             def _update():
-                for iid in self.htree.get_children():
-                    vals = self.htree.item(iid).get('values')
-                    if vals and vals[0] == ip:
-                        vals[2] = hn; self.htree.item(iid, values=vals); break
-            self.after(0, _update)
+                try:
+                    for iid in self.htree.get_children():
+                        vals = self.htree.item(iid).get('values')
+                        if vals and vals[0] == ip:
+                            vals[2] = hn; self.htree.item(iid, values=vals); break
+                except Exception:
+                    pass
+            try: self.after(0, _update)
+            except Exception: pass
         except Exception: pass
 
     def _probe_hosts(self):
@@ -2559,11 +2648,17 @@ class TopologyPage(ctk.CTkFrame):
             if not path: return
             with open(path, 'w', encoding='utf-8') as f:
                 f.write('ip,mac,hostname,vendor,last_seen,status\n')
-                for iid in self.htree.get_children():
-                    vals = self.htree.item(iid).get('values')
-                    if not vals: continue
-                    row = [str(v).replace(',', ' ') for v in vals]
-                    f.write(','.join(row) + '\n')
+                try:
+                    for iid in self.htree.get_children():
+                        try:
+                            vals = self.htree.item(iid).get('values')
+                            if not vals: continue
+                            row = [str(v).replace(',', ' ') for v in vals]
+                            f.write(','.join(row) + '\n')
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             messagebox.showinfo(tr('export'), 'Hosts exported to: ' + path)
         except Exception:
             logging.exception('Export hosts failed')
@@ -2658,7 +2753,7 @@ class SettingsPage(ctk.CTkFrame):
         mode_card.pack(fill="x",padx=24,pady=(0,12))
         ind_row = ctk.CTkFrame(mode_card, fg_color="transparent")
         ind_row.pack(fill="x",padx=16,pady=(14,4))
-        self._mode_indicator = ctk.CTkLabel(ind_row, text="", font=("Consolas",12,"bold"),
+        self._mode_indicator = ctk.CTkLabel(ind_row, text="", font=(FONT_FAMILY_MONO,12,"bold"),
             text_color=T["bg_deep"], fg_color=T["warn"], corner_radius=8, width=270, height=28)
         self._mode_indicator.pack(side="left", padx=(0,12))
         self._demo_var = tk.BooleanVar(value=CFG.get("demo_mode",True))
@@ -2684,6 +2779,24 @@ class SettingsPage(ctk.CTkFrame):
                       variable=self._ai_log, font=FONT_BODY,
                       text_color=T["text_primary"],
                       progress_color=T["accent"]).pack(anchor="w",padx=16,pady=(0,12))
+        # AI provider API keys
+        r = ctk.CTkFrame(ai_card, fg_color="transparent"); r.pack(fill="x", padx=16, pady=(4,4))
+        ctk.CTkLabel(r, text="Gemini API Key", font=FONT_SMALL, text_color=T["text_dim"], width=150).pack(side="left")
+        self._ai_gemini_var = tk.StringVar(value=str(CFG.get("gemini_api_key", "")))
+        self._ai_gemini = ctk.CTkEntry(r, width=420, font=FONT_MONO, fg_color=T["bg_card"], border_color=T["border"], text_color=T["text_primary"], corner_radius=8, show="•", textvariable=self._ai_gemini_var)
+        self._ai_gemini.pack(side="left", padx=8)
+
+        r2 = ctk.CTkFrame(ai_card, fg_color="transparent"); r2.pack(fill="x", padx=16, pady=(4,4))
+        ctk.CTkLabel(r2, text="OpenAI API Key", font=FONT_SMALL, text_color=T["text_dim"], width=150).pack(side="left")
+        self._ai_openai_var = tk.StringVar(value=str(CFG.get("openai_api_key", "")))
+        self._ai_openai = ctk.CTkEntry(r2, width=420, font=FONT_MONO, fg_color=T["bg_card"], border_color=T["border"], text_color=T["text_primary"], corner_radius=8, show="•", textvariable=self._ai_openai_var)
+        self._ai_openai.pack(side="left", padx=8)
+
+        r3 = ctk.CTkFrame(ai_card, fg_color="transparent"); r3.pack(fill="x", padx=16, pady=(4,8))
+        ctk.CTkLabel(r3, text="Claude / Anthropic Key", font=FONT_SMALL, text_color=T["text_dim"], width=150).pack(side="left")
+        self._ai_claude_var = tk.StringVar(value=str(CFG.get("ai_api_key", "")))
+        self._ai_claude = ctk.CTkEntry(r3, width=420, font=FONT_MONO, fg_color=T["bg_card"], border_color=T["border"], text_color=T["text_primary"], corner_radius=8, show="•", textvariable=self._ai_claude_var)
+        self._ai_claude.pack(side="left", padx=8)
         self._section(scroll, tr('telegram_bot'))
         tg_card = ctk.CTkFrame(scroll, fg_color=T["bg_card"], corner_radius=12)
         tg_card.pack(fill="x", padx=24, pady=(0, 12))
@@ -2776,7 +2889,7 @@ class SettingsPage(ctk.CTkFrame):
         for code, label in [("en","English"),("ru","Русский"),("kk","Қазақша")]:
             ctk.CTkRadioButton(lang_row, text=label, variable=self._lang_var, value=code,
                                font=FONT_BODY, text_color=T["text_primary"], fg_color=T["accent"]).pack(side="left", padx=8)
-        ctk.CTkButton(scroll, text=tr("save_all"), width=160,
+        ctk.CTkButton(scroll, text=tr("save"), width=160,
                       fg_color=T["accent"], text_color=T["bg_deep"], font=FONT_SMALL,
                       command=self._apply_language).pack(anchor="w",padx=24,pady=(6,12))
 
@@ -2939,7 +3052,7 @@ class SettingsPage(ctk.CTkFrame):
 
     def _on_mode_toggle(self):
         is_demo = self._demo_var.get()
-        self._update_mode_ui(); CFG["demo_mode"] = is_demo; save_config(CFG)
+        self._update_mode_ui(); CFG["demo_mode"] = is_demo
         self.app_ref.apply_mode(is_demo)
         self._status.configure(text=f" {'SIMULATION' if is_demo else 'LIVE CAPTURE'} mode.")
         try: self.app_ref.pages["dash"]._refresh_mode_banner()
@@ -2956,7 +3069,11 @@ class SettingsPage(ctk.CTkFrame):
     def _apply_adapter(self):
         new = self._adapter_var.get()
         if new:
-            CFG["adapter"] = new; save_config(CFG)
+            if not self.app_ref._adapter_exists(new):
+                messagebox.showwarning("Adapter not found", f"Adapter '{new}' is not available on this system.")
+                return
+            # Apply adapter dynamically in-memory; persist only on Save All
+            CFG["adapter"] = new
             self.app_ref.restart_capture(new)
             self._status.configure(text=f"  Capture restarted on {new}")
 
@@ -3063,9 +3180,16 @@ class SettingsPage(ctk.CTkFrame):
 
     def _apply_theme(self):
         CFG["theme"] = self._theme_var.get(); CFG["accent"] = self._accent_var.get()
-        save_config(CFG); messagebox.showinfo(tr("appearance"), tr("saved_restart"))
+        # Do not persist to disk here; Save All will persist user changes
+        try:
+            self.app_ref.apply_appearance()
+        except Exception:
+            pass
+        messagebox.showinfo(tr("appearance"), "Appearance applied.")
 
     def _save_all(self):
+        CFG["theme"] = self._theme_var.get()
+        CFG["accent"] = self._accent_var.get()
         CFG["auto_block"]       = self._auto_block.get()
         CFG["log_to_file"]      = self._log_file.get()
         CFG["demo_mode"]        = self._demo_var.get()
@@ -3073,9 +3197,23 @@ class SettingsPage(ctk.CTkFrame):
         CFG["ai_log_dialogs"]   = self._ai_log.get()
         try: CFG["max_table_rows"] = int(self._max_rows.get())
         except ValueError: pass
+        CFG["language"] = self._lang_var.get()
         CFG["tg_token"]   = self._tg_token.get().strip()
         CFG["tg_chat_id"] = self._tg_chat.get().strip()
         
+        # Save selected adapter if user changed it in settings
+        if hasattr(self, '_adapter_var'):
+            new_adapter = self._adapter_var.get().strip()
+            if new_adapter:
+                if self.app_ref._adapter_exists(new_adapter):
+                    CFG["adapter"] = new_adapter
+                    try:
+                        self.app_ref.restart_capture(new_adapter)
+                    except Exception:
+                        pass
+                else:
+                    messagebox.showwarning("Adapter not found", f"Adapter '{new_adapter}' is not available on this system.")
+
         # Save new notification settings
         CFG["email_server"] = getattr(self, '_notif_email_server', ctk.CTkEntry).get().strip() if hasattr(self, '_notif_email_server') else ""
         CFG["email_port"] = getattr(self, '_notif_email_port', ctk.CTkEntry).get().strip() if hasattr(self, '_notif_email_port') else ""
@@ -3094,13 +3232,43 @@ class SettingsPage(ctk.CTkFrame):
         CFG["auto_backup"] = self._auto_backup.get() if hasattr(self, '_auto_backup') else False
         CFG["backup_interval"] = self._backup_interval.get().strip() if hasattr(self, '_backup_interval') else "24"
         
-        save_config(CFG)
+        # Persisting to disk moved to Save All; keep in-memory state only here
+        try:
+            self.app_ref.apply_appearance()
+        except Exception:
+            pass
+        try:
+            self.app_ref.apply_language(CFG.get("language", "en"))
+        except Exception:
+            pass
+        try:
+            self.app_ref.apply_mode(CFG.get("demo_mode", True))
+        except Exception:
+            pass
+        try:
+            save_config(CFG)
+        except Exception:
+            logging.exception("Failed to persist settings")
+        # Persist AI API keys as part of Save All (use StringVar values)
+        try:
+            if hasattr(self, '_ai_gemini_var'):
+                CFG['gemini_api_key'] = (self._ai_gemini_var.get() or '').strip()
+            if hasattr(self, '_ai_openai_var'):
+                CFG['openai_api_key'] = (self._ai_openai_var.get() or '').strip()
+            if hasattr(self, '_ai_claude_var'):
+                CFG['ai_api_key'] = (self._ai_claude_var.get() or '').strip()
+            save_config(CFG)
+        except Exception:
+            logging.exception('Failed to persist API keys')
         try:
             self.engine.reload_telegram()
         except Exception:
             pass
         self.engine.reload_sigs()
-        self._status.configure(text=f"  {tr('saved_restart')}")
+        try:
+            self._status.configure(text="  Settings applied.")
+        except Exception:
+            pass
 
     def _export_cfg(self):
         try:
@@ -3180,6 +3348,11 @@ class SOCSentinel(ctk.CTk):
         self._MGMT_RATE_WINDOW: float       = 1.0
         self._MGMT_LIMITED_TYPES: frozenset = frozenset({"Dot11Deauth", "Dot11Disas"})
 
+        if self.adapter and not self._adapter_exists(self.adapter):
+            self.adapter = ""
+        # Do not auto-select a default network adapter.
+        # The adapter should only be set when the user explicitly chooses one.
+
         self._agg_lock           = threading.Lock()
         self._agg_pkt_total: int = 0
         self._agg_deauth_counts: dict = {}
@@ -3225,16 +3398,16 @@ class SOCSentinel(ctk.CTk):
             if not SCAPY_AVAILABLE:
                 messagebox.showwarning("Scapy Missing",
                     "Install: pip install scapy\nWindows: also install Npcap.\n\nFalling back to simulation.")
-                CFG["demo_mode"]=True; self.engine.set_demo_mode(True); return
+                CFG["demo_mode"] = True; self.engine.set_demo_mode(True); return
             if not self.adapter:
                 messagebox.showwarning("No Adapter",
                     "Select a network adapter in Settings  Network Interface first.")
-                CFG["demo_mode"]=True; self.engine.set_demo_mode(True); return
+                CFG["demo_mode"] = True; self.engine.set_demo_mode(True); return
             self._start_capture(self.adapter)
             if hasattr(self,'pages'):
                 self.pages["logs"].append(f"LIVE mode on {self.adapter}.","INFO")
                 self.status_lbl.configure(text=f"  {tr('monitoring')}", text_color=T["safe"])
-        save_config(CFG)
+        # Persisting config is handled by Save All; do not write to disk here
 
     def simulate_attack(self):
         fake_ip = "192.168.1.250"
@@ -3342,7 +3515,7 @@ class SOCSentinel(ctk.CTk):
         self.sidebar.grid_propagate(False)
         lg = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         lg.pack(fill="x", padx=16, pady=(28,16))
-        ctk.CTkLabel(lg, text="SOC SENTINEL", font=("Consolas",16,"bold"),
+        ctk.CTkLabel(lg, text="SOC SENTINEL", font=(FONT_FAMILY_MONO,16,"bold"),
                      text_color=T["accent"]).pack()
         u, role = self._current_user
         badge = ctk.CTkFrame(self.sidebar, fg_color="transparent")
@@ -3393,8 +3566,8 @@ class SOCSentinel(ctk.CTk):
 
         left = ctk.CTkFrame(topbar, fg_color="transparent")
         left.pack(side="left", padx=16, pady=8)
-        ctk.CTkLabel(left, text="", font=("Consolas",22), text_color=T["accent"]).pack(side="left")
-        ctk.CTkLabel(left, text="SOC SENTINEL v2", font=("Segoe UI Semibold",12), text_color=T["text_primary"]).pack(side="left", padx=(8,0))
+        ctk.CTkLabel(left, text="", font=(FONT_FAMILY_MONO,22), text_color=T["accent"]).pack(side="left")
+        ctk.CTkLabel(left, text="SOC SENTINEL v2", font=(FONT_FAMILY_SANS_BOLD,12), text_color=T["text_primary"]).pack(side="left", padx=(8,0))
 
         right = ctk.CTkFrame(topbar, fg_color="transparent")
         right.pack(side="right", padx=16, pady=8)
@@ -3403,7 +3576,7 @@ class SOCSentinel(ctk.CTk):
             right, text=f"  {tr('menu')}", width=120, height=44,
             fg_color=T["bg_card"], text_color=T["text_dim"],
             hover_color=_adjust_color(T["bg_hover"],1.05),
-            font=("Segoe UI Semibold",12), corner_radius=12,
+            font=(FONT_FAMILY_SANS_BOLD,12), corner_radius=12,
             border_width=1, border_color=T["border"], command=self._toggle_sidebar)
         self._sidebar_btn.pack(side="left", padx=(0,8))
 
@@ -3411,7 +3584,7 @@ class SOCSentinel(ctk.CTk):
             right, text=f"  {tr('assistant')}", width=140, height=44,
             fg_color=_adjust_color(T["accent"],0.9), text_color=T["bg_deep"],
             hover_color=_adjust_color(T["accent"],1.15),
-            font=("Segoe UI Semibold",12), corner_radius=12, border_width=0,
+            font=(FONT_FAMILY_SANS_BOLD,12), corner_radius=12, border_width=0,
             command=self._toggle_ai)
         self._ai_btn.pack(side="left")
 
@@ -3434,7 +3607,7 @@ class SOCSentinel(ctk.CTk):
         except Exception: pass
 
         try:
-            CFG["demo_mode"] = False; save_config(CFG)
+            CFG["demo_mode"] = False
         except Exception: pass
 
         self.after(200, lambda: [self._sidebar_btn.lift(), self._ai_btn.lift()])
@@ -3535,7 +3708,7 @@ class SOCSentinel(ctk.CTk):
         btn = ctk.CTkButton(
             self.sidebar, text=f"  {icon}   {label_text}", anchor="w", height=48,
             fg_color="transparent", hover_color=_adjust_color(T["bg_hover"],1.03),
-            text_color=T["text_dim"], font=("Segoe UI Semibold",11),
+            text_color=T["text_dim"], font=(FONT_FAMILY_SANS_BOLD,11),
             corner_radius=DEFAULT_CORNER, command=lambda p=pid: self.show_page(p))
         btn.pack(fill="x", padx=10, pady=2); self._nav_btns[pid] = btn
 
@@ -3554,7 +3727,7 @@ class SOCSentinel(ctk.CTk):
         try:
             try: i18n.change_language(lang)
             except Exception: pass
-            CFG["language"] = lang; save_config(CFG)
+            CFG["language"] = lang
         except Exception:
             logging.exception("Failed to save language to config")
         try:
@@ -3582,6 +3755,17 @@ class SOCSentinel(ctk.CTk):
             except Exception: self.show_page('dash')
         except Exception:
             logging.exception("Error rebuilding UI")
+
+    def apply_appearance(self):
+        try:
+            CFG["theme"] = CFG.get("theme", "dark")
+            CFG["accent"] = CFG.get("accent", "cyan")
+            ctk.set_appearance_mode("Dark" if CFG["theme"] == "dark" else "Light")
+            global T
+            T = build_theme(CFG["theme"], CFG["accent"])
+            self._rebuild_ui_preserve_state()
+        except Exception:
+            logging.exception("Failed to apply appearance dynamically")
 
     def _toggle_sidebar(self):
         if self.sidebar_visible:
@@ -3611,11 +3795,47 @@ class SOCSentinel(ctk.CTk):
             self._sidebar_btn.lift(); self._ai_btn.lift()
         except Exception: pass
 
+    def _select_default_adapter(self) -> str:
+        try:
+            adapters = psutil.net_if_addrs()
+            if not adapters:
+                return ""
+            candidates = []
+            for name, addrs in adapters.items():
+                lname = name.lower()
+                if lname.startswith(("loopback", "lo")):
+                    continue
+                ips = [a.address for a in addrs if a.family == socket.AF_INET and a.address not in ("127.0.0.1", "0.0.0.0")]
+                if not ips:
+                    continue
+                if name.strip() == "":
+                    continue
+                kind = "other"
+                if any(k in lname for k in ("wi-fi", "wifi", "wlan", "wireless")): kind = "wifi"
+                elif any(k in lname for k in ("eth", "ethernet", "lan")): kind = "ethernet"
+                candidates.append((kind, name))
+            if not candidates:
+                return ""
+            priority = {"wifi": 0, "ethernet": 1, "other": 2}
+            candidates.sort(key=lambda item: (priority.get(item[0], 2), item[1]))
+            return candidates[0][1]
+        except Exception:
+            return ""
+
+    def _adapter_exists(self, adapter_name: str) -> bool:
+        try:
+            if not adapter_name:
+                return False
+            return adapter_name in psutil.net_if_addrs()
+        except Exception:
+            return False
+
     def _start_capture(self, adapter):
         if not SCAPY_AVAILABLE: return
         self._running = False
         if self._sniff_thread and self._sniff_thread.is_alive(): time.sleep(0.4)
-        self.adapter = adapter; CFG["adapter"] = adapter; save_config(CFG)
+        # Apply adapter in-memory only; do not persist to disk here
+        self.adapter = adapter; CFG["adapter"] = adapter
         self.adapter_lbl.configure(text=adapter[:24])
         self._running = True
         self._sniff_thread = threading.Thread(target=self._sniff_loop, daemon=True,
@@ -3797,6 +4017,14 @@ if __name__ == "__main__":
             if not ctypes.windll.shell32.IsUserAnAdmin():
                 messagebox.showwarning(tr("admin_required_title"), tr("admin_required_msg"))
         except Exception: pass
+    else:
+        try:
+            import os
+            if hasattr(os, "geteuid") and os.geteuid() != 0:
+                print("[WARNING] SOC Sentinel should run as root on Linux for packet capture.")
+                print("Run: sudo python WifiSecuritySystem.py")
+        except Exception:
+            pass
     if not SCAPY_AVAILABLE:
         print("="*60)
         print("WARNING: scapy not installed  running in simulation mode.")

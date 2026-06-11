@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+from utils.crypto import load_json_encrypted
+
 CONFIG_FILE = Path("sentinel_config.json")
 DEFAULT = {
     "adapter": "", "theme": "dark", "accent": "cyan",
@@ -26,56 +28,63 @@ DEFAULT = {
 
 def load_config():
     cfg = None
-    # First, try loading with crypto.py for backwards compatibility
-    try:
-        from utils.crypto import load_json_encrypted
-        cfg = load_json_encrypted(CONFIG_FILE, DEFAULT)
-    except Exception:
-        pass
-    # If that didn't work, load plain JSON
-    if cfg is None:
-        if CONFIG_FILE.exists():
-            try:
-                with open(CONFIG_FILE, encoding="utf-8") as f:
-                    cfg = json.load(f)
-            except Exception:
-                pass
-    # If still None, use defaults
+    config_enc_path = CONFIG_FILE.with_suffix(CONFIG_FILE.suffix + ".enc")
+
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception:
+            cfg = None
+
+    if cfg is None and config_enc_path.exists():
+        try:
+            cfg = load_json_encrypted(CONFIG_FILE, DEFAULT)
+        except Exception:
+            cfg = None
+
     if cfg is None:
         cfg = dict(DEFAULT)
-    
-    # Now, set defaults for missing keys
+
     for k, v in DEFAULT.items():
         cfg.setdefault(k, v)
-    
-    # Now decrypt sensitive values using utils/encryption.py
+
     try:
         from utils.encryption import get_or_create_key, decrypt_config_values
         key = get_or_create_key()
         cfg = decrypt_config_values(cfg, key)
-    except Exception as e:
+    except Exception:
         import logging
         logging.exception("Failed to decrypt config values")
-        
+
     return cfg
 
+
 def save_config(cfg):
-    # First, encrypt sensitive values using utils/encryption.py
     try:
-        from utils.encryption import get_or_create_key, encrypt_config_values
+        from utils.encryption import get_or_create_key, encrypt_config_values, decrypt_config_values
         key = get_or_create_key()
-        cfg = encrypt_config_values(cfg.copy(), key)
-    except Exception as e:
+        if cfg.get("encrypt_config"):
+            cfg = encrypt_config_values(cfg.copy(), key)
+        else:
+            cfg = decrypt_config_values(cfg.copy(), key)
+    except Exception:
         import logging
-        logging.exception("Failed to encrypt config values")
-        
-    # Now save
+        logging.exception("Failed to prepare config values for saving")
+
     try:
+        config_enc_path = CONFIG_FILE.with_suffix(CONFIG_FILE.suffix + ".enc")
         if cfg.get("encrypt_config"):
             from utils.crypto import encrypt_json
-            encrypt_json(CONFIG_FILE, cfg)
+            if encrypt_json(CONFIG_FILE, cfg):
+                return
         else:
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, indent=2)
+            if config_enc_path.exists():
+                try:
+                    config_enc_path.unlink()
+                except Exception:
+                    pass
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
     except Exception:
         pass

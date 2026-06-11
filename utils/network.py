@@ -74,6 +74,10 @@ def open_firewall_port(port: int = 5000) -> bool:
                 f"name=SOC_Sentinel_Web_{port}", "dir=in", "action=allow",
                 "protocol=TCP", f"localport={port}", "profile=private"],
                 check=True, capture_output=True)
+        elif sys.platform.startswith("linux"):
+            # На Linux веб-порт обычно не требует специального открытия в iptables для исходящего/локального доступа.
+            # Если нужен доступ извне, пользователь сам настроит firewall/ufw.
+            pass
         return True
     except Exception:
         return False

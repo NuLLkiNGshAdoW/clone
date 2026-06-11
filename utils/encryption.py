@@ -19,25 +19,60 @@ except ImportError:
     Fernet = None
     InvalidToken = None
 
-KEY_FILE = Path("sentinel_key.key")
+KEY_FILE = Path(__file__).resolve().parent.parent / "sentinel_key.key"
+FALLBACK_KEY_FILE = Path.home() / ".soc_sentinel_key.key"
+
+def _resolve_key_file() -> Path:
+    if KEY_FILE.exists():
+        return KEY_FILE
+    if FALLBACK_KEY_FILE.exists():
+        return FALLBACK_KEY_FILE
+    return KEY_FILE
 
 def generate_key() -> bytes:
     """Generate a new encryption key and save it to key file."""
-    if KEY_FILE.exists():
+    key_path = _resolve_key_file()
+    if key_path.exists():
         logging.warning("Key file already exists. Not overwriting.")
-        with open(KEY_FILE, "rb") as f:
-            return f.read()
-    key = Fernet.generate_key()
-    with open(KEY_FILE, "wb") as f:
-        f.write(key)
-    KEY_FILE.chmod(0o600)  # Restrict permissions
-    return key
+        try:
+            with open(key_path, "rb") as f:
+                return f.read()
+        except Exception:
+            logging.exception("Failed to read existing key file")
+    if Fernet is None:
+        key = os.urandom(32)
+    else:
+        key = Fernet.generate_key()
+    try:
+        with open(key_path, "wb") as f:
+            f.write(key)
+        try:
+            key_path.chmod(0o600)
+        except Exception:
+            pass
+        return key
+    except Exception:
+        logging.exception("Failed to write key file")
+        try:
+            FALLBACK_KEY_FILE.write_bytes(key)
+            try:
+                FALLBACK_KEY_FILE.chmod(0o600)
+            except Exception:
+                pass
+            return key
+        except Exception:
+            logging.exception("Failed to write fallback key file")
+            return key
 
 def get_or_create_key() -> bytes:
     """Get existing key or create new one."""
-    if KEY_FILE.exists():
-        with open(KEY_FILE, "rb") as f:
-            return f.read()
+    key_path = _resolve_key_file()
+    if key_path.exists():
+        try:
+            with open(key_path, "rb") as f:
+                return f.read()
+        except Exception:
+            logging.exception("Failed to read existing key file")
     return generate_key()
 
 def encrypt(data: str, key: bytes) -> str:
@@ -72,6 +107,8 @@ SENSITIVE_CONFIG_KEYS = [
 def encrypt_config_values(config: dict, key: bytes) -> dict:
     """Encrypt sensitive values in config dict."""
     if Fernet is None:
+        if config.get("encrypt_config"):
+            config["encrypt_config"] = False
         return config
     for key_name in SENSITIVE_CONFIG_KEYS:
         if key_name in config and config[key_name]:

@@ -1,5 +1,6 @@
 import threading
 import sys
+import subprocess
 from tkinter import messagebox
 
 
@@ -10,41 +11,32 @@ def safe_len(x):
         return 0
 
 
-# Initialize optional Windows notifier. If a richer implementation is
-# available in the environment, replace this placeholder with it.
-WinNotifier = None
-if sys.platform == "win32":
-    try:
-        import ctypes  # noqa: F401
-
-        class _WinNotifier:
-            @staticmethod
-            def send(title, message, severity="INFO"):
-                # Placeholder: show a simple messagebox as a fallback
-                try:
-                    messagebox.showinfo(title, message)
-                except Exception:
-                    print(f"{title}: {message}")
-
-        WinNotifier = _WinNotifier
-    except Exception:
-        WinNotifier = None
-
-
 def show_system_toast(title: str, message: str, severity: str = "INFO"):
-    """Show a native toast on Windows or fallback to messagebox/print.
-
-    Attempts to use a platform notifier when available. Falls back to
-    tkinter.messagebox and finally to printing to stdout.
-    """
+    """Show a native notification on Linux/Windows or fallback to messagebox/print."""
     try:
-        if WinNotifier is not None and sys.platform == "win32":
-            WinNotifier.send(title, message, severity)
-        else:
+        if sys.platform.startswith("linux"):
+            urgency = "critical" if severity == "CRITICAL" else "normal"
+            try:
+                subprocess.Popen(
+                    ["notify-send", "-u", urgency, title, message],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+        if sys.platform == "win32":
             try:
                 messagebox.showinfo(title, message)
+                return
             except Exception:
-                print(f"{title}: {message}")
+                pass
+        try:
+            messagebox.showinfo(title, message)
+        except Exception:
+            print(f"{title}: {message}")
     except Exception:
         try:
             print(f"{title}: {message}")
