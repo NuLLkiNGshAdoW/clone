@@ -3992,6 +3992,7 @@ class SOCSentinel(ctk.CTk):
         self.adapter = adapter; CFG["adapter"] = adapter
         self.adapter_lbl.configure(text=adapter[:24])
         logging.info(f"[Sniffer._start_capture] Starting sniffer on {adapter}")
+        logging.info(f"[Sniffer._start_capture] IMPORTANT: Make sure {adapter} is in MONITOR mode!")
         self._running = True
         self._sniff_thread = threading.Thread(target=self._sniff_loop, daemon=True,
                                                name="ScapySnifferThread")
@@ -4009,16 +4010,24 @@ class SOCSentinel(ctk.CTk):
             except Exception: pass
 
         _log(f"Sniffer started: iface={iface!r}  BPF={bpf_filter!r}")
+        logging.info(f"[Sniffer._sniff_loop] Starting scapy.sniff on {iface}, filter={bpf_filter!r}")
 
         kwargs = dict(iface=iface, prn=self._handle_pkt, store=0, filter=bpf_filter)
+        pkt_counter = 0
         while self._running:
             try:
+                logging.debug(f"[Sniffer._sniff_loop] Calling scapy.sniff(timeout=2, iface={iface})")
                 scapy.sniff(timeout=2, **kwargs)
+                pkt_counter += 1
+                logging.debug(f"[Sniffer._sniff_loop] sniff() returned after timeout, iteration={pkt_counter}")
             except OSError as e:
+                logging.error(f"[Sniffer._sniff_loop] OSError: {e}")
                 _log(f"Sniffer OSError: {e}", "CRITICAL"); time.sleep(3)
             except Exception as e:
+                logging.error(f"[Sniffer._sniff_loop] Exception: {e}")
                 _log(f"Sniffer error: {e}", "CRITICAL"); time.sleep(3)
 
+        logging.info("[Sniffer._sniff_loop] Sniffer stopped")
         _log("Sniffer stopped.")
 
     def _handle_pkt(self, pkt) -> None:
@@ -4028,6 +4037,11 @@ class SOCSentinel(ctk.CTk):
         try:
             with self._agg_lock:
                 self._agg_pkt_total += 1
+                pkt_count = self._agg_pkt_total
+
+            # Log packet arrival
+            if pkt_count % 100 == 0:  # Log every 100th packet to reduce spam
+                logging.debug(f"[Sniffer._handle_pkt] Received packet #{pkt_count}")
 
             if pkt.haslayer("EAPOL"):
                 if self.engine.result_q.qsize() < 100:
@@ -4040,7 +4054,8 @@ class SOCSentinel(ctk.CTk):
                     self._agg_deauth_counts[src_mac] = (
                         self._agg_deauth_counts.get(src_mac, 0) + 1
                     )
-                    logging.debug(f"[Sniffer] Deauth/Disas from {src_mac}, count now: {self._agg_deauth_counts[src_mac]}")
+                    deauth_count = self._agg_deauth_counts[src_mac]
+                    logging.debug(f"[Sniffer] Deauth/Disas from {src_mac}, count now: {deauth_count}")
                 return
 
             qsize = self.engine.result_q.qsize()
