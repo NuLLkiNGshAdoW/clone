@@ -756,22 +756,30 @@ def make_canvas(parent, fig):
 
 class AuthWindow(ctk.CTkToplevel):
     def __init__(self, master=None):
+        logging.info("[AuthWindow] __init__ started")
         super().__init__(master)
+        logging.info("[AuthWindow] CTkToplevel.__init__() completed")
         self.title("SOC SENTINEL  Authentication")
         self.geometry("460x560"); self.resizable(False, False)
         self.configure(fg_color=T["bg_deep"]); self.grab_set()
         self.result = None; self._mode = tk.StringVar(value="login")
-        self._build(); self.protocol("WM_DELETE_WINDOW", self._cancel)
+        logging.info("[AuthWindow] Building form")
+        self._build()
+        logging.info("[AuthWindow] Form built, setting protocol")
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
         try:
             i18n.register(self.refresh_ui)
             self.bind("<Destroy>", lambda e: i18n.unregister(self.refresh_ui))
         except Exception: pass
+        logging.info("[AuthWindow] Updating idletasks and positioning window")
         self.update_idletasks()
         x = (self.winfo_screenwidth()  - 460) // 2
         y = (self.winfo_screenheight() - 560) // 2
         self.geometry(f"460x560+{x}+{y}")
+        logging.info("[AuthWindow] __init__ completed")
 
     def _build(self):
+        logging.info("[AuthWindow._build] started")
         hdr = ctk.CTkFrame(self, fg_color=T["bg_panel"], corner_radius=DEFAULT_CORNER, height=90, border_width=1, border_color=T["border"])
         hdr.pack(fill="x"); hdr.pack_propagate(False)
         ctk.CTkLabel(hdr, text="", font=(FONT_FAMILY_SANS_BOLD,38),
@@ -798,6 +806,7 @@ class AuthWindow(ctk.CTkToplevel):
                                           hover_color=_adjust_color(T["accent"],1.25),
                                           corner_radius=DEFAULT_CORNER, text_color=T["bg_deep"], command=self._submit)
         self._submit_btn.pack(padx=30, fill="x")
+        logging.info("[AuthWindow._build] completed")
 
     def _build_form(self):
         for w in self._form.winfo_children(): w.destroy()
@@ -3322,18 +3331,26 @@ class SettingsPage(ctk.CTkFrame):
 
 class SOCSentinel(ctk.CTk):
     def __init__(self):
+        logging.info("[SOCSentinel] __init__ started")
         ctk.set_appearance_mode("Dark" if CFG["theme"]=="dark" else "Light")
+        logging.info("[SOCSentinel] CTk appearance mode set")
         super().__init__()
+        logging.info("[SOCSentinel] CTk.__init__() completed")
         try:
+            logging.info("[SOCSentinel] Setting i18n root")
             i18n.set_root(self)
+            logging.info("[SOCSentinel] i18n root set, changing language")
             try: i18n.change_language(CFG.get("language", "en"))
-            except Exception: pass
-        except Exception: pass
+            except Exception: logging.exception("[SOCSentinel] i18n.change_language failed")
+        except Exception: logging.exception("[SOCSentinel] i18n setup failed")
+        logging.info("[SOCSentinel] Setting window title and geometry")
         self.title("SOC SENTINEL v2  AI Cybersecurity Dashboard")
         self.geometry("1860x1020"); self.minsize(1280,780)
         self.configure(fg_color=T["bg_deep"]); self.withdraw()
+        logging.info("[SOCSentinel] Window configured, creating ThreatEngine")
         self.bot              = None
         self.engine           = ThreatEngine(self.bot)
+        logging.info("[SOCSentinel] ThreatEngine created")
         self.adapter          = CFG.get("adapter","")
         self._running         = False
         self._sniff_thread    = None
@@ -3366,10 +3383,15 @@ class SOCSentinel(ctk.CTk):
         self._pull_tick: int = 0
         self._CHART_EVERY: int = 5
 
+        logging.info("[SOCSentinel] __init__ completed, scheduling auth")
         self.after(100, self._do_auth)
 
     def _do_auth(self):
-        auth = AuthWindow(self); self.wait_window(auth)
+        logging.info("[SOCSentinel] _do_auth called, showing AuthWindow")
+        auth = AuthWindow(self)
+        logging.info("[SOCSentinel] AuthWindow created, waiting for window")
+        self.wait_window(auth)
+        logging.info("[SOCSentinel] AuthWindow closed")
         if auth.result is None: self.destroy(); return
         self._current_user = auth.result
         username, role = auth.result
