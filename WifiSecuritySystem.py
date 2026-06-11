@@ -3391,19 +3391,41 @@ class SOCSentinel(ctk.CTk):
         auth = AuthWindow(self)
         logging.info("[SOCSentinel] AuthWindow created, waiting for window")
         self.wait_window(auth)
-        logging.info("[SOCSentinel] AuthWindow closed")
-        if auth.result is None: self.destroy(); return
-        self._current_user = auth.result
-        username, role = auth.result
-        self.title(f"SOC SENTINEL v2    {username.upper()}  [{tr(role).upper()}]")
-        ttk_style(); self._build(); self.deiconify()
-        self.apply_mode(CFG.get("demo_mode",True))
-        self._drain_queue()
-        self._pull_deauth_stats()
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self._schedule_global_gc()
-        if CFG.get("web_autostart", False):
-            self._start_flask_api()
+        logging.info("[SOCSentinel] AuthWindow closed, result=%s", auth.result)
+        try:
+            if auth.result is None:
+                logging.info("[SOCSentinel] AuthWindow returned no result, destroying main window")
+                self.destroy()
+                return
+            self._current_user = auth.result
+            username, role = auth.result
+            logging.info("[SOCSentinel] Auth successful: %s / %s", username, role)
+            self.title(f"SOC SENTINEL v2    {username.upper()}  [{tr(role).upper()}]")
+            logging.info("[SOCSentinel] running ttk_style and _build")
+            ttk_style()
+            self._build()
+            logging.info("[SOCSentinel] _build complete, deiconifying main window")
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+            try:
+                self.attributes('-topmost', True)
+                self.attributes('-topmost', False)
+            except Exception:
+                pass
+            self.state('normal')
+            self.apply_mode(CFG.get("demo_mode",True))
+            logging.info("[SOCSentinel] apply_mode complete")
+            self._drain_queue()
+            self._pull_deauth_stats()
+            self.protocol("WM_DELETE_WINDOW", self._on_close)
+            self._schedule_global_gc()
+            if CFG.get("web_autostart", False):
+                self._start_flask_api()
+            logging.info("[SOCSentinel] _do_auth finished")
+        except Exception:
+            logging.exception("[SOCSentinel] Error during post-auth initialization")
+            raise
 
     def apply_mode(self, demo: bool):
         self._running = False
