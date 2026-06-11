@@ -3456,6 +3456,7 @@ class SOCSentinel(ctk.CTk):
 
     def apply_mode(self, demo: bool):
         self._running = False
+        logging.info(f"[SOCSentinel] apply_mode(demo={demo})")
         try:
             self.engine.set_demo_mode(False)
         except Exception:
@@ -3465,12 +3466,14 @@ class SOCSentinel(ctk.CTk):
                 except Exception: pass
         self.engine.reset_stats()
         if demo:
+            logging.info("[SOCSentinel] Entering DEMO mode")
             CFG["demo_mode"] = True; self.engine.set_demo_mode(True)
             if hasattr(self,'pages'):
                 self.pages["logs"].append("SIMULATION mode active.","INFO")
                 self.status_lbl.configure(text=f"  {tr('simulation_mode')}", text_color=T["warn"])
         else:
             CFG["demo_mode"] = False
+            logging.info("[SOCSentinel] Entering LIVE capture mode")
             if not SCAPY_AVAILABLE:
                 messagebox.showwarning("Scapy Missing",
                     "Install: pip install scapy\nWindows: also install Npcap.\n\nFalling back to simulation.")
@@ -3479,6 +3482,7 @@ class SOCSentinel(ctk.CTk):
                 messagebox.showwarning("No Adapter",
                     "Select a network adapter in Settings  Network Interface first.")
                 CFG["demo_mode"] = True; self.engine.set_demo_mode(True); return
+            logging.info(f"[SOCSentinel] Starting live capture on adapter: {self.adapter}")
             self._start_capture(self.adapter)
             if hasattr(self,'pages'):
                 self.pages["logs"].append(f"LIVE mode on {self.adapter}.","INFO")
@@ -3987,6 +3991,7 @@ class SOCSentinel(ctk.CTk):
         # Apply adapter in-memory only; do not persist to disk here
         self.adapter = adapter; CFG["adapter"] = adapter
         self.adapter_lbl.configure(text=adapter[:24])
+        logging.info(f"[Sniffer._start_capture] Starting sniffer on {adapter}")
         self._running = True
         self._sniff_thread = threading.Thread(target=self._sniff_loop, daemon=True,
                                                name="ScapySnifferThread")
@@ -4035,6 +4040,7 @@ class SOCSentinel(ctk.CTk):
                     self._agg_deauth_counts[src_mac] = (
                         self._agg_deauth_counts.get(src_mac, 0) + 1
                     )
+                    logging.debug(f"[Sniffer] Deauth/Disas from {src_mac}, count now: {self._agg_deauth_counts[src_mac]}")
                 return
 
             qsize = self.engine.result_q.qsize()
@@ -4059,6 +4065,8 @@ class SOCSentinel(ctk.CTk):
             self._agg_pkt_total     = 0
             self._agg_deauth_counts = {}
 
+        logging.debug(f"[Sniffer._pull_deauth_stats] tick={self._pull_tick}, pkt_total={pkt_total}, deauth_snapshot={deauth_snapshot}")
+
         try:
             now_str = datetime.now().strftime("%H:%M:%S")
             flood_macs = {
@@ -4067,6 +4075,7 @@ class SOCSentinel(ctk.CTk):
             }
 
             if flood_macs:
+                logging.info(f"[Sniffer._pull_deauth_stats] FLOOD DETECTED: {flood_macs}")
                 top_mac      = max(flood_macs, key=flood_macs.__getitem__)
                 top_count    = flood_macs[top_mac]
                 total_deauth = sum(deauth_snapshot.values())
@@ -4087,15 +4096,19 @@ class SOCSentinel(ctk.CTk):
                 if self.engine.lock.acquire(timeout=0.05):
                     try:
                         self.engine.alerts.append(alert)
+                        logging.info(f"[Sniffer._pull_deauth_stats] Alert added to engine.alerts: {alert}")
                     finally:
                         self.engine.lock.release()
+                else:
+                    logging.warning(f"[Sniffer._pull_deauth_stats] Failed to acquire engine.lock")
 
                 def _fire_callbacks(a=alert):
+                    logging.debug(f"[Sniffer._pull_deauth_stats] Firing {len(getattr(self.engine, 'alert_callbacks', []))} alert callbacks")
                     for cb in getattr(self.engine, "alert_callbacks", []):
                         try:
                             cb(a)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logging.exception(f"[Sniffer._pull_deauth_stats] Alert callback failed: {e}")
 
                 threading.Thread(
                     target=_fire_callbacks,
