@@ -4035,7 +4035,12 @@ class SOCSentinel(ctk.CTk):
             return
 
         # ALWAYS log packet arrival first - BEFORE incrementing counter
-        logging.debug(f"[Sniffer._handle_pkt] PACKET ARRIVED: {pkt.summary()}")
+        try:
+            pkt_summary = pkt.summary()
+        except Exception:
+            pkt_summary = str(type(pkt))
+        
+        logging.debug(f"[Sniffer._handle_pkt] PACKET ARRIVED: {pkt_summary}")
 
         try:
             with self._agg_lock:
@@ -4046,20 +4051,71 @@ class SOCSentinel(ctk.CTk):
             if pkt_count % 100 == 0:  
                 logging.info(f"[Sniffer._handle_pkt] Received packet #{pkt_count}")
 
+            # Log packet layers for debugging
+            layers = [layer.__class__.__name__ for layer in pkt.layers()]
+            if pkt_count % 50 == 0:
+                logging.debug(f"[Sniffer._handle_pkt] Layers in packet: {layers}")
+
             if pkt.haslayer("EAPOL"):
                 if self.engine.result_q.qsize() < 100:
                     self.engine.submit(pkt)
                 return
 
-            if pkt.haslayer(scapy.Dot11Deauth) or pkt.haslayer(scapy.Dot11Disas):
-                src_mac: str = pkt[scapy.Dot11].addr2 or "ff:ff:ff:ff:ff:ff"
-                with self._agg_lock:
-                    self._agg_deauth_counts[src_mac] = (
-                        self._agg_deauth_counts.get(src_mac, 0) + 1
+            # Check for Management frames (Deauth/Disassoc)
+            if pkt.haslayer(scapy.Dot11):
+                dot11 = pkt[scapy.Dot11]
+                dot11_type = getattr(dot11, 'type', None)
+                dot11_subtype = getattr(dot11, 'subtype', None)
+                if dot11_type is not None and dot11_subtype is not None:
+                    logging.debug(
+                        f"[Sniffer._handle_pkt] Dot11 type={dot11_type} subtype={dot11_subtype}"
                     )
-                    deauth_count = self._agg_deauth_counts[src_mac]
-                    logging.debug(f"[Sniffer] Deauth/Disas from {src_mac}, count now: {deauth_count}")
-                return
+
+                # Try to detect management frames by explicit Scapy layer first
+                if pkt.haslayer(scapy.Dot11Deauth):
+                    logging.warning(f"[Sniffer] DEAUTH FRAME DETECTED!")
+                    src_mac: str = dot11.addr2 or "ff:ff:ff:ff:ff:ff"
+                    with self._agg_lock:
+                        self._agg_deauth_counts[src_mac] = (
+                            self._agg_deauth_counts.get(src_mac, 0) + 1
+                        )
+                        deauth_count = self._agg_deauth_counts[src_mac]
+                        logging.warning(f"[Sniffer] Deauth from {src_mac}, count now: {deauth_count}")
+                    return
+
+                if pkt.haslayer(scapy.Dot11Disas):
+                    logging.warning(f"[Sniffer] DISASSOC FRAME DETECTED!")
+                    src_mac: str = dot11.addr2 or "ff:ff:ff:ff:ff:ff"
+                    with self._agg_lock:
+                        self._agg_deauth_counts[src_mac] = (
+                            self._agg_deauth_counts.get(src_mac, 0) + 1
+                        )
+                        deauth_count = self._agg_deauth_counts[src_mac]
+                        logging.warning(f"[Sniffer] Disassoc from {src_mac}, count now: {deauth_count}")
+                    return
+
+                # Fallback: detect by raw Dot11 subtype if explicit layer missing
+                if dot11_type == 0 and dot11_subtype == 12:
+                    logging.warning("[Sniffer] FALLBACK DEAUTH FRAME detected by subtype")
+                    src_mac: str = dot11.addr2 or "ff:ff:ff:ff:ff:ff"
+                    with self._agg_lock:
+                        self._agg_deauth_counts[src_mac] = (
+                            self._agg_deauth_counts.get(src_mac, 0) + 1
+                        )
+                        deauth_count = self._agg_deauth_counts[src_mac]
+                        logging.warning(f"[Sniffer] Deauth fallback from {src_mac}, count now: {deauth_count}")
+                    return
+
+                if dot11_type == 0 and dot11_subtype == 10:
+                    logging.warning("[Sniffer] FALLBACK DISASSOC FRAME detected by subtype")
+                    src_mac: str = dot11.addr2 or "ff:ff:ff:ff:ff:ff"
+                    with self._agg_lock:
+                        self._agg_deauth_counts[src_mac] = (
+                            self._agg_deauth_counts.get(src_mac, 0) + 1
+                        )
+                        deauth_count = self._agg_deauth_counts[src_mac]
+                        logging.warning(f"[Sniffer] Disassoc fallback from {src_mac}, count now: {deauth_count}")
+                    return
 
             qsize = self.engine.result_q.qsize()
             if qsize >= 30:
@@ -4067,7 +4123,8 @@ class SOCSentinel(ctk.CTk):
                 return
             self.engine.submit(pkt)
 
-        except Exception:
+        except Exception as e:
+            logging.exception(f"[Sniffer._handle_pkt] Exception: {e}")
             pass
 
     def _pull_deauth_stats(self) -> None:
