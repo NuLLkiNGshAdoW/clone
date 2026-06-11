@@ -4034,14 +4034,17 @@ class SOCSentinel(ctk.CTk):
         if not self._running:
             return
 
+        # ALWAYS log packet arrival first - BEFORE incrementing counter
+        logging.debug(f"[Sniffer._handle_pkt] PACKET ARRIVED: {pkt.summary()}")
+
         try:
             with self._agg_lock:
                 self._agg_pkt_total += 1
                 pkt_count = self._agg_pkt_total
 
-            # Log packet arrival
-            if pkt_count % 100 == 0:  # Log every 100th packet to reduce spam
-                logging.debug(f"[Sniffer._handle_pkt] Received packet #{pkt_count}")
+            # Log packet arrival every 100th packet
+            if pkt_count % 100 == 0:  
+                logging.info(f"[Sniffer._handle_pkt] Received packet #{pkt_count}")
 
             if pkt.haslayer("EAPOL"):
                 if self.engine.result_q.qsize() < 100:
