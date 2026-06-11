@@ -195,6 +195,13 @@ class ThreatEngine:
         self.SIGS = _get_sigs_from_cfg(cfg)
         self.proc_map = {}
         self.local_ips = set()
+        self._cfg = cfg
+        self._cfg_last_refresh = time.time()
+        self._cfg_refresh_interval = 5.0
+        self._local_network_refresh = 10.0
+        self._local_network_last_refresh = time.time()
+        self._local_ips = self._load_local_ips()
+        self._local_macs = self._load_local_macs()
 
         try:
             import os
@@ -255,6 +262,43 @@ class ThreatEngine:
         self._proc_thread = threading.Thread(target=self._proc_loop, daemon=True)
         self._proc_thread.start()
 
+    def _load_local_ips(self):
+        try:
+            from utils.network import get_local_ips
+            return set(entry["ip"] for entry in get_local_ips())
+        except Exception:
+            return {"127.0.0.1", "::1"}
+
+    def _load_local_macs(self):
+        try:
+            from psutil import net_if_addrs
+            local_macs = set()
+            for _, addrs in net_if_addrs().items():
+                for addr in addrs:
+                    address = getattr(addr, 'address', None)
+                    if isinstance(address, str):
+                        normalized = address.lower()
+                        if len(normalized) == 17 and normalized.count(":") == 5:
+                            local_macs.add(normalized)
+            return local_macs
+        except Exception:
+            return set()
+
+    def _refresh_config(self):
+        now = time.time()
+        if now - self._cfg_last_refresh > self._cfg_refresh_interval:
+            self._cfg = load_config()
+            self.SIGS = _get_sigs_from_cfg(self._cfg)
+            self._cfg_last_refresh = now
+        return self._cfg
+
+    def _refresh_local_network(self):
+        now = time.time()
+        if now - self._local_network_last_refresh > self._local_network_refresh:
+            self._local_ips = self._load_local_ips()
+            self._local_macs = self._load_local_macs()
+            self._local_network_last_refresh = now
+
     def set_demo_mode(self, enabled: bool):
         # Create demo generator lazily so core owns demo lifecycle
         self._demo = bool(enabled)
@@ -291,6 +335,13 @@ class ThreatEngine:
 
     def submit(self, pkt):
         try:
+            if self.result_q.qsize() > 100:
+                logging.debug("[ThreatEngine] submit(): dropping pkt because result_q is busy qsize=%s", self.result_q.qsize())
+                return
+            work_queue = getattr(self._executor, '_work_queue', None)
+            if work_queue is not None and work_queue.qsize() > 100:
+                logging.debug("[ThreatEngine] submit(): dropping pkt because executor queue is busy qsize=%s", work_queue.qsize())
+                return
             self._executor.submit(self._analyze_and_queue, pkt)
         except RuntimeError:
             logging.exception("Executor not accepting new tasks")
@@ -343,137 +394,119 @@ class ThreatEngine:
     def analyze(self, pkt):
         import logging
         logging.debug(f"[DBG-01] analyze() entering: pkt_type={type(pkt)}")
-        if not SCAPY_AVAILABLE: 
+        if not SCAPY_AVAILABLE:
             logging.debug(f"[DBG-01] analyze(): SCAPY not available, exiting early")
             return "N/A", "#777", []
-        threats = []; now = time.time(); size = len(pkt)
-        cfg = load_config()
-        
-        # ── FIRST: CHECK IF PACKET IS TO/FROM OUR OWN WEB PORT (IGNORE COMPLETELY) ──
+
+        cfg = self._refresh_config()
         web_port = int(cfg.get("web_port", 5000))
         if pkt.haslayer(scapy.TCP):
             tcp = pkt[scapy.TCP]
             if tcp.dport == web_port or tcp.sport == web_port:
                 return " SAFE", "#0F0", []
-        
+
+        now = time.time()
+        size = len(pkt)
+        threats = []
+
+        pkt_ip = pkt[scapy.IP] if pkt.haslayer(scapy.IP) else None
+        src_ip = pkt_ip.src if pkt_ip else None
+
         with self.lock:
             self.packet_count += 1
             self.packet_stats["total"] += 1
             self.packet_stats["bytes"] += size
 
-            # ── AUTO-WHITELIST: GET ALL LOCAL IP ADDRESSES ──
-            from utils.network import get_local_ips
-            local_ips = set(entry["ip"] for entry in get_local_ips())
+            self._refresh_local_network()
+            local_ips = set(self._local_ips)
             local_ips.add("127.0.0.1")
             local_ips.add("::1")
-            
-            src_ip = None
-            if pkt.haslayer(scapy.IP):
-                src_ip = pkt[scapy.IP].src
-            # Also check if it's our own MAC (if available)
-            local_macs = set()
-            try:
-                from psutil import net_if_addrs
-                for iface_name, addrs in net_if_addrs():
-                    for addr in addrs:
-                        if hasattr(addr, 'address'):
-                            if len(addr.address) == 17 and addr.address.count(":") == 5:
-                                local_macs.add(addr.address.lower())
-            except Exception:
-                pass
-            
-            # ── CHECK WHITELIST FIRST (IGNORE COMPLETELY IF WHITELISTED) ──
-            # Check MAC addresses
-            if hasattr(pkt, 'src'):
-                if pkt.src in local_macs:
-                    return " SAFE", "#0F0", []
-            if hasattr(pkt, 'dst'):
-                if pkt.dst in local_macs:
-                    return " SAFE", "#0F0", []
-            # Check IP addresses
-            if pkt.haslayer(scapy.IP):
-                src = pkt[scapy.IP].src
-                dst = pkt[scapy.IP].dst
+            local_macs = self._local_macs
+
+            if pkt_ip and pkt_ip.src in local_ips:
+                return " SAFE", "#0F0", []
+
+            if hasattr(pkt, 'src') and isinstance(pkt.src, str) and pkt.src.lower() in local_macs:
+                return " SAFE", "#0F0", []
+            if hasattr(pkt, 'dst') and isinstance(pkt.dst, str) and pkt.dst.lower() in local_macs:
+                return " SAFE", "#0F0", []
+
+            if pkt_ip:
+                src = pkt_ip.src
+                dst = pkt_ip.dst
                 if src in local_ips or dst in local_ips:
                     return " SAFE", "#0F0", []
-                # Also check user-defined whitelist
                 if is_whitelisted(src):
                     logging.debug("[Whitelist] Ignoring packet from whitelisted %s", src)
                     return " SAFE", "#0F0", []
 
-            # per-IP rate tracking (packets per second sliding window)
-            if pkt.haslayer(scapy.IP):
-                src = pkt[scapy.IP].src
                 dq = self.ip_rate[src]
                 dq.append(now)
-                # remove old
                 window = 2.0
                 while dq and now - dq[0] > window:
                     dq.popleft()
                 pps = len(dq)
-                # simple high-rate detection
-                cfg = load_config()
                 pps_thresh = cfg.get("pps_thresh", 200)
                 if pps >= pps_thresh:
                     threats.append(("HIGH_PPS", src, "HIGH"))
-            if cfg.get("device_fingerprint_enabled", True) and pkt.haslayer(scapy.IP):
-                src_fp = pkt[scapy.IP].src
-                vend = lookup_vendor(self.arp_table.get(src_fp, "")) if self.arp_table.get(src_fp) else ""
+            else:
+                src = None
+                dst = None
+
+            if cfg.get("device_fingerprint_enabled", True) and pkt_ip:
+                src_fp = pkt_ip.src
+                vend = ""
+                if self.arp_table.get(src_fp):
+                    if not _OUI_CACHE:
+                        load_oui()
+                    vend = lookup_vendor(self.arp_table.get(src_fp))
                 threats.extend(self._device_fp.analyze_packet(pkt, src_fp, vendor=vend, now=now))
+
             if pkt.haslayer(scapy.ARP):
                 self.proto_counts["ARP"] += 1
                 if pkt[scapy.ARP].op == 2:
                     ip_a = pkt[scapy.ARP].psrc; mac = pkt[scapy.ARP].hwsrc
                     if ip_a in self.arp_table and self.arp_table[ip_a] != mac:
                         threats.append(("ARP_SPOOF", ip_a, "CRITICAL"))
-                    # store vendor information for discovered ARP hosts
-                    try:
+                    if not _OUI_CACHE:
                         load_oui()
-                        self.arp_table[ip_a] = mac
-                    except Exception:
-                        self.arp_table[ip_a] = mac
+                    self.arp_table[ip_a] = mac
 
-            if not pkt.haslayer(scapy.IP): return " SAFE", "#0F0", []
-            src = pkt[scapy.IP].src; dst = pkt[scapy.IP].dst
-            # try to attach vendor if present in arp table
-            vendor = None
-            try:
-                mac = self.arp_table.get(src)
-                if mac:
-                    load_oui()
-                    vendor = lookup_vendor(mac)
-            except Exception:
-                vendor = None
+            if not pkt_ip:
+                return " SAFE", "#0F0", []
+
             if src in self.blocked_ips or self._ips.is_blocked(src):
                 self.packet_stats["blocked"] += 1
                 return "🚫 BLOCKED", "#800080", []
+
+            vendor = None
+            if self.arp_table:
+                try:
+                    if not _OUI_CACHE:
+                        load_oui()
+                    mac = self.arp_table.get(src)
+                    if mac:
+                        vendor = lookup_vendor(mac)
+                except Exception:
+                    vendor = None
+
             if pkt.haslayer(scapy.TCP):
                 self.proto_counts["TCP"] += 1
                 flags = int(pkt[scapy.TCP].flags); dport = pkt[scapy.TCP].dport
                 if (flags & 0x02) and not (flags & 0x10):
                     self.syn_track[src].append(now)
-                    # keep only recent
                     self.syn_track[src] = deque([t for t in self.syn_track[src] if now-t < 2], maxlen=500)
                     if len(self.syn_track[src]) >= self.SIGS.get("SYN_FLOOD", {}).get("thresh", 100):
                         threats.append(("SYN_FLOOD", src, "CRITICAL"))
-                
-                # PORT SCAN DETECTION (fixed):
-                # 1. Add (timestamp, dport)
-                # 2. Filter out entries older than window (from config, default 5s)
-                # 3. Count UNIQUE ports in that window
+
                 scan_window = self.SIGS.get("PORT_SCAN", {}).get("window", 5)
                 self.port_scan_track[src].append((now, dport))
-                # Remove old entries
                 while self.port_scan_track[src] and (now - self.port_scan_track[src][0][0]) > scan_window:
                     self.port_scan_track[src].popleft()
-                # Get unique ports in window
-                unique_ports = set()
-                for ts, dp in self.port_scan_track[src]:
-                    unique_ports.add(dp)
+                unique_ports = set(dp for _, dp in self.port_scan_track[src])
                 # Also, skip localhost/web ports (to avoid false positives from our own web UI)
-                cfg_web_port = load_config().get("web_port", 5000)
+                cfg_web_port = cfg.get("web_port", 5000)
                 if len(unique_ports) >= self.SIGS.get("PORT_SCAN", {}).get("thresh", 15):
-                    # Check if it's NOT just hitting web port (5000) or localhost
                     if not (src in ("127.0.0.1", "::1") or (len(unique_ports) == 1 and cfg_web_port in unique_ports)):
                         threats.append(("PORT_SCAN", src, "HIGH"))
                 if dport in (22, 3389, 21, 23):

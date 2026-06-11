@@ -3498,21 +3498,23 @@ class SOCSentinel(ctk.CTk):
         import logging
         q = self.engine.result_q
         qsize = q.qsize()
-        logging.debug(f"[DBG-03] _drain_queue(): qsize={qsize}")
+        current_page = getattr(self, '_current_page', None)
+        logging.debug(f"[DBG-03] _drain_queue(): qsize={qsize}, page={current_page}")
 
         if qsize > 500:
             drop = qsize - 100
             for _ in range(drop):
                 try: q.get_nowait()
                 except queue.Empty: break
+            logging.debug("[DBG-03] _drain_queue(): dropped %s stale results", drop)
             BATCH = 5
             next_ms = 200
         elif qsize > 100:
-            BATCH = 10
-            next_ms = 100
+            BATCH = 8
+            next_ms = 120
         else:
-            BATCH = 20
-            next_ms = 50
+            BATCH = 12
+            next_ms = 60
 
         processed = 0
         while processed < BATCH:
@@ -3530,13 +3532,17 @@ class SOCSentinel(ctk.CTk):
                 is_wifi = r.get("wifi_threat", False)
 
                 try:
-                    if is_wifi or processed % 3 == 0:
-                        self.pages["dash"].add_live_row(src, dst, app, size, status)
+                    dash_page = self.pages.get("dash")
+                    if dash_page and (is_wifi or current_page == "dash"):
+                        dash_page.add_live_row(src, dst, app, size, status)
                 except Exception: pass
 
                 try:
-                    if not r.get("_display_only"):
-                        self.pages["analyzer"].add_packet(r)
+                    analyzer_page = self.pages.get("analyzer")
+                    if analyzer_page and not r.get("_display_only") and (
+                        current_page == "analyzer" or qsize < 40 or processed % 5 == 0
+                    ):
+                        analyzer_page.add_packet(r)
                 except Exception: pass
 
                 try:
@@ -4025,6 +4031,7 @@ class SOCSentinel(ctk.CTk):
                 return
 
             if self.engine.result_q.qsize() >= 50:
+                logging.debug("[Sniffer] drop packet: result_q full qsize=%s", self.engine.result_q.qsize())
                 return
             self.engine.submit(pkt)
 
