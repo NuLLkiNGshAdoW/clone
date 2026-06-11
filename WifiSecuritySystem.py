@@ -80,7 +80,7 @@ except ImportError:
     FLASK_AVAILABLE = False
     print("[WARNING] Flask not installed. Run: pip install flask flask-cors")
 
-logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='[%(asctime)s] %(levelname)s: %(message)s')
 
 DEVICE_MAP = {
     "192.168.0.107": "Workstation (Almaty)",
@@ -1312,6 +1312,7 @@ TASK: {instruction}
 
 class DashboardPage(ctk.CTkFrame):
     def __init__(self, master, engine, **kw):
+        t0 = time.time(); logging.info("[DashboardPage] __init__ start")
         super().__init__(master, fg_color="transparent", **kw)
         self.engine       = engine
         self._net_prev    = psutil.net_io_counters()
@@ -1332,8 +1333,10 @@ class DashboardPage(ctk.CTkFrame):
         self._bw_fill       = None
         self._build()
         self._tick()
+        logging.info("[DashboardPage] __init__ completed in %.3f sec", time.time()-t0)
 
     def _build(self):
+        t0 = time.time(); logging.info("[DashboardPage] _build start")
         scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
         scroll.pack(fill="both", expand=True, pady=(8,8))
 
@@ -1365,12 +1368,14 @@ class DashboardPage(ctk.CTkFrame):
             c.pack(side="left", padx=8, pady=4)
         kpi_inner.bind("<Configure>",
                        lambda e: kpi_canvas.configure(scrollregion=kpi_canvas.bbox("all")))
+        logging.info("[DashboardPage] _build complete")
 
         self._mode_banner = ctk.CTkLabel(scroll, text="", font=FONT_SMALL,
                                           text_color=T["bg_deep"], fg_color="transparent",
                                           corner_radius=6)
         self._mode_banner.pack(pady=(0,6))
         self._refresh_mode_banner()
+        logging.info("[DashboardPage] _build complete in %.3f sec", time.time()-t0)
 
         mid = ctk.CTkFrame(scroll, fg_color="transparent")
         mid.pack(fill="both", expand=True, pady=(0,10), padx=20)
@@ -1643,6 +1648,7 @@ class AnalyzerPage(ctk.CTkFrame):
     _GC_MS        = 60_000
 
     def __init__(self, master, engine, **kw):
+        logging.info("[AnalyzerPage] __init__ start")
         super().__init__(master, fg_color="transparent", **kw)
         self.engine = engine
         self._incoming: collections.deque = collections.deque()
@@ -1652,6 +1658,8 @@ class AnalyzerPage(ctk.CTkFrame):
         self._build()
         self._schedule_flush()
         self._schedule_gc()
+        logging.info("[AnalyzerPage] __init__ completed")
+        logging.info("[AnalyzerPage] _build complete")
 
     def _build(self):
         tb = ctk.CTkFrame(self, fg_color=T["bg_panel"], corner_radius=10)
@@ -1994,12 +2002,15 @@ class AnalyzerPage(ctk.CTkFrame):
 
 class ThreatPage(ctk.CTkFrame):
     def __init__(self, master, engine, **kw):
+        logging.info("[ThreatPage] __init__ start")
         super().__init__(master, fg_color="transparent", **kw)
         self.engine = engine; self._build()
         for a in engine.alerts[-300:]: self._on_alert(a)
         engine.alert_callbacks.append(self._on_alert); self._tick()
+        logging.info("[ThreatPage] __init__ completed")
 
     def _build(self):
+        logging.info("[ThreatPage] _build start")
         krow = ctk.CTkFrame(self, fg_color="transparent")
         krow.pack(fill="x", padx=20, pady=(20,10))
         self.sev_cards = {}
@@ -2026,6 +2037,7 @@ class ThreatPage(ctk.CTkFrame):
         self.atree.configure(yscrollcommand=asb.set)
         asb.pack(side="right",fill="y",padx=(0,4))
         self.atree.pack(fill="both",expand=True,padx=4,pady=(0,8))
+        logging.info("[ThreatPage] _build complete")
         self.atree.bind("<<TreeviewSelect>>", self._sel_alert)
 
         bot = ctk.CTkFrame(self, fg_color=T["bg_panel"], corner_radius=12)
@@ -2397,22 +2409,20 @@ class WebAccessPage(ctk.CTkFrame):
                 self._url_box.delete("0.0", "end")
                 self._url_box.insert("end", "\n".join(lines))
                 self._url_box.configure(state="disabled")
-            except Exception: pass
+            except Exception:
+                pass
             self._primary = urls[0]["url"] if urls else ""
 
             # Update KPIs from app_ref
             if self.app_ref:
                 try:
-                    # Status
                     if self.app_ref._flask_running:
                         self._kpi_status.set(tr("active_status"))
                         self._kpi_status.set_color(T["safe"])
                     else:
                         self._kpi_status.set(tr("blocked_status"))
                         self._kpi_status.set_color(T["danger"])
-                    # Requests
                     self._kpi_requests.set(str(self.app_ref._flask_request_count))
-                    # Uptime
                     if self.app_ref._flask_running and self.app_ref._flask_start_time:
                         delta = datetime.now() - self.app_ref._flask_start_time
                         total_secs = int(delta.total_seconds())
@@ -2427,7 +2437,9 @@ class WebAccessPage(ctk.CTkFrame):
                         self._kpi_uptime.set(uptime_str)
                     else:
                         self._kpi_uptime.set("0s")
-                except Exception: pass
+                except Exception:
+                    pass
+            logging.info("[WebAccessPage] _refresh complete")
         except Exception as e:
             logging.error(f"WebAccessPage refresh error: {e}")
 
@@ -2458,8 +2470,10 @@ class WebAccessPage(ctk.CTkFrame):
 
 class TopologyPage(ctk.CTkFrame):
     def __init__(self, master, engine, **kw):
+        logging.info("[TopologyPage] __init__ start")
         super().__init__(master, fg_color="transparent", **kw)
         self.engine = engine; self._build(); self._tick()
+        logging.info("[TopologyPage] __init__ completed")
 
     def _build(self):
         top = ctk.CTkFrame(self, fg_color=T["bg_panel"], corner_radius=12)
@@ -2679,6 +2693,7 @@ class TopologyPage(ctk.CTkFrame):
 
 class LogsPage(ctk.CTkFrame):
     def __init__(self, master, engine, **kw):
+        logging.info("[LogsPage] __init__ start")
         super().__init__(master, fg_color="transparent", **kw)
         self.engine = engine
         self._log_path = LOG_DIR / f"sentinel_{datetime.now().strftime('%Y%m%d')}.log"
@@ -2690,6 +2705,7 @@ class LogsPage(ctk.CTkFrame):
         )
         self._writer_thread.start()
         self._build()
+        logging.info("[LogsPage] __init__ completed")
 
     def _file_writer_loop(self) -> None:
         while True:
@@ -2744,10 +2760,12 @@ class LogsPage(ctk.CTkFrame):
 
 class SettingsPage(ctk.CTkFrame):
     def __init__(self, master, engine, app_ref, current_user=None, **kw):
+        logging.info("[SettingsPage] __init__ start")
         super().__init__(master, fg_color="transparent", **kw)
         self.engine = engine; self.app_ref = app_ref
         self.current_user = current_user or ("guest","user")
         self._build()
+        logging.info("[SettingsPage] __init__ completed")
 
     def _build(self):
         scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
@@ -2759,6 +2777,7 @@ class SettingsPage(ctk.CTkFrame):
         info.pack(fill="x",padx=24,pady=(0,8))
         ctk.CTkLabel(info, text=u.upper(),
                      font=FONT_HEADER, text_color=T["accent"]).pack(side="left",padx=16,pady=12)
+        logging.info("[SettingsPage] _build complete")
         ctk.CTkLabel(info, text=f"{tr('role')}: {tr(role).upper()}", font=FONT_SMALL,
                      text_color=T["text_dim"]).pack(side="right",padx=16)
 
@@ -3661,14 +3680,14 @@ class SOCSentinel(ctk.CTk):
         }
         logging.info("[SOCSentinel] creating initial pages")
         try:
-            self._create_page("dash")
             self._create_page("logs")
         except Exception:
             logging.exception("[SOCSentinel] Failed while creating initial pages")
             raise
         logging.info("[SOCSentinel] initial pages created")
-        self.show_page("dash")
-        logging.info("[SOCSentinel] show_page(dash) complete")
+        self.show_page("logs")
+        logging.info("[SOCSentinel] show_page(logs) complete")
+        self.after(200, self._show_default_page)
 
         if "settings" in self.pages:
             try:
@@ -3725,12 +3744,16 @@ class SOCSentinel(ctk.CTk):
         if builder is None:
             raise KeyError(f"Unknown page: {name}")
         logging.info("[SOCSentinel] Creating page %s", name)
+        start = time.time()
         page = builder()
+        elapsed = time.time() - start
+        logging.info("[SOCSentinel] Page %s created in %.3f sec", name, elapsed)
         page.grid(row=0, column=0, sticky="nsew")
         self.pages[name] = page
         return page
 
     def show_page(self, name):
+        logging.info("[SOCSentinel] show_page requested: %s", name)
         if name not in self.pages:
             if name in getattr(self, '_page_builders', {}):
                 self._create_page(name)
@@ -3747,6 +3770,17 @@ class SOCSentinel(ctk.CTk):
         except Exception: pass
         try: self._sidebar_btn.lift(); self._ai_btn.lift()
         except Exception: pass
+
+    def _show_default_page(self):
+        logging.info("[SOCSentinel] _show_default_page starting")
+        try:
+            self.show_page("dash")
+            logging.info("[SOCSentinel] _show_default_page complete")
+        except Exception:
+            logging.exception("[SOCSentinel] _show_default_page failed, falling back to logs")
+            try: self.show_page("logs")
+            except Exception:
+                logging.exception("[SOCSentinel] fallback show_page(logs) failed")
 
     def _start_flask_api(self):
         if not FLASK_AVAILABLE:
