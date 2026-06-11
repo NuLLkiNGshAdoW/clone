@@ -3392,28 +3392,36 @@ class SOCSentinel(ctk.CTk):
         logging.info("[SOCSentinel] AuthWindow created, waiting for window")
         self.wait_window(auth)
         logging.info("[SOCSentinel] AuthWindow closed, result=%s", auth.result)
+        if auth.result is None:
+            logging.info("[SOCSentinel] AuthWindow returned no result, destroying main window")
+            self.destroy()
+            return
+        self._current_user = auth.result
+        username, role = auth.result
+        logging.info("[SOCSentinel] Auth successful: %s / %s", username, role)
+        self.title(f"SOC SENTINEL v2    {username.upper()}  [{tr(role).upper()}]")
+        self.deiconify()
+        self.lift()
+        self.focus_force()
         try:
-            if auth.result is None:
-                logging.info("[SOCSentinel] AuthWindow returned no result, destroying main window")
-                self.destroy()
-                return
+            self.attributes('-topmost', True)
+            self.attributes('-topmost', False)
+        except Exception:
+            pass
+        self.state('normal')
+        self.update_idletasks()
+        logging.info("[SOCSentinel] Main window shown before build")
+        self.after(50, lambda: self._post_auth_init(auth))
+
+    def _post_auth_init(self, auth):
+        try:
+            logging.info("[SOCSentinel] post-auth init started")
             self._current_user = auth.result
             username, role = auth.result
-            logging.info("[SOCSentinel] Auth successful: %s / %s", username, role)
-            self.title(f"SOC SENTINEL v2    {username.upper()}  [{tr(role).upper()}]")
             logging.info("[SOCSentinel] running ttk_style and _build")
             ttk_style()
             self._build()
-            logging.info("[SOCSentinel] _build complete, deiconifying main window")
-            self.deiconify()
-            self.lift()
-            self.focus_force()
-            try:
-                self.attributes('-topmost', True)
-                self.attributes('-topmost', False)
-            except Exception:
-                pass
-            self.state('normal')
+            logging.info("[SOCSentinel] _build complete")
             self.apply_mode(CFG.get("demo_mode",True))
             logging.info("[SOCSentinel] apply_mode complete")
             self._drain_queue()
@@ -3422,7 +3430,7 @@ class SOCSentinel(ctk.CTk):
             self._schedule_global_gc()
             if CFG.get("web_autostart", False):
                 self._start_flask_api()
-            logging.info("[SOCSentinel] _do_auth finished")
+            logging.info("[SOCSentinel] post-auth init finished")
         except Exception:
             logging.exception("[SOCSentinel] Error during post-auth initialization")
             raise
@@ -3552,6 +3560,7 @@ class SOCSentinel(ctk.CTk):
         self.after(next_ms, self._drain_queue)
 
     def _build(self):
+        logging.info("[SOCSentinel] _build started")
         self.grid_columnconfigure(0, minsize=228)
         self.grid_columnconfigure(1, weight=1)
         self.grid_columnconfigure(2, minsize=0)
@@ -3561,6 +3570,7 @@ class SOCSentinel(ctk.CTk):
                                      corner_radius=0, border_width=1,
                                      border_color=T["border"])
         self.sidebar.grid(row=0, column=0, sticky="nsew")
+        logging.info("[SOCSentinel] sidebar created")
         self.sidebar.grid_propagate(False)
         lg = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         lg.pack(fill="x", padx=16, pady=(28,16))
@@ -3637,19 +3647,26 @@ class SOCSentinel(ctk.CTk):
             command=self._toggle_ai)
         self._ai_btn.pack(side="left")
 
-        self.pages = {
-            "dash":         DashboardPage(self.content, self.engine),
-            "analyzer":     AnalyzerPage(self.content, self.engine),
-            "threats":      ThreatPage(self.content, self.engine),
-            "active_blocks": ActiveBlocksPage(self.content, self.engine),
-            "web":          WebAccessPage(self.content, self.engine, self),
-            "topology":     TopologyPage(self.content, self.engine),
-            "logs":         LogsPage(self.content, self.engine),
-            "settings":     SettingsPage(self.content, self.engine, self, self._current_user),
-        }
+        logging.info("[SOCSentinel] creating pages")
+        try:
+            self.pages = {
+                "dash":         DashboardPage(self.content, self.engine),
+                "analyzer":     AnalyzerPage(self.content, self.engine),
+                "threats":      ThreatPage(self.content, self.engine),
+                "active_blocks": ActiveBlocksPage(self.content, self.engine),
+                "web":          WebAccessPage(self.content, self.engine, self),
+                "topology":     TopologyPage(self.content, self.engine),
+                "logs":         LogsPage(self.content, self.engine),
+                "settings":     SettingsPage(self.content, self.engine, self, self._current_user),
+            }
+        except Exception:
+            logging.exception("[SOCSentinel] Failed while creating pages")
+            raise
+        logging.info("[SOCSentinel] pages created")
         for p in self.pages.values():
             p.grid(row=0, column=0, sticky="nsew")
         self.show_page("dash")
+        logging.info("[SOCSentinel] show_page(dash) complete")
 
         try:
             self.pages["settings"]._add_simulate_button(self.pages["settings"])
