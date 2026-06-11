@@ -456,6 +456,11 @@ def load_config():
     except Exception:
         logging.exception("Error decrypting config values")
 
+    # Auto-detect WiFi interface on Linux/Kali
+    if sys.platform.startswith('linux') and cfg.get('adapter') == 'Беспроводная сеть':
+        cfg['adapter'] = 'wlan0'
+        logging.info("[Config] Auto-detected WiFi interface on Linux: wlan0")
+
     return cfg
 
 
