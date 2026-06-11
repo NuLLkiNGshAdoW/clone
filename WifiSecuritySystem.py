@@ -3687,7 +3687,11 @@ class SOCSentinel(ctk.CTk):
         logging.info("[SOCSentinel] initial pages created")
         self.show_page("logs")
         logging.info("[SOCSentinel] show_page(logs) complete")
-        self.after(200, self._show_default_page)
+        if "dash" in self._page_builders:
+            self._default_page_after_id = self.after_idle(self._show_default_page)
+            logging.info("[SOCSentinel] scheduled default page via after_idle id=%s", self._default_page_after_id)
+        else:
+            logging.warning("[SOCSentinel] dash page builder missing, skipping default page")
 
         if "settings" in self.pages:
             try:
@@ -3774,11 +3778,19 @@ class SOCSentinel(ctk.CTk):
     def _show_default_page(self):
         logging.info("[SOCSentinel] _show_default_page starting")
         try:
+            if hasattr(self, '_default_page_after_id'):
+                try:
+                    self.after_cancel(self._default_page_after_id)
+                    logging.info("[SOCSentinel] cancelled pending default page after id=%s", self._default_page_after_id)
+                except Exception:
+                    pass
+                self._default_page_after_id = None
             self.show_page("dash")
             logging.info("[SOCSentinel] _show_default_page complete")
         except Exception:
             logging.exception("[SOCSentinel] _show_default_page failed, falling back to logs")
-            try: self.show_page("logs")
+            try:
+                self.show_page("logs")
             except Exception:
                 logging.exception("[SOCSentinel] fallback show_page(logs) failed")
 
